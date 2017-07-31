@@ -54,22 +54,21 @@ void SoftwareSerial::begin(long speed)
     setTX(_transmitPin);
     setRX(_receivePin);
     // Precalculate the various delays
-    //Calculate the distance between bit in micro seconds
-    uint32_t bit_delay = (float(1)/speed)*1000000;
+    // Calculate the distance between bit in micro seconds
+    uint16_t bit_delay = (uint16_t) ((uint32_t) 1000000 / (uint32_t) speed);
  
     _tx_delay = bit_delay;
-  
-    //Wait 1/2 bit - 2 micro seconds (time for interrupt to be served)
+    // Wait 1/2 bit - 2 micro seconds (time for interrupt to be served)
     _rx_delay_centering = (bit_delay/2) - 2;
-    //Wait 1 bit - 2 micro seconds (time in each loop iteration)
+    // Wait 1 bit - 2 micro seconds (time in each loop iteration)
     _rx_delay_intrabit = bit_delay - 1;//2
-    //Wait 1 bit (the stop one) 
+    // Wait 1 bit (the stop one) 
     _rx_delay_stopbit = bit_delay; 
 
        
-      delayMicroseconds(_tx_delay);
+    delayMicroseconds(_tx_delay);
 
-      listen();
+    listen();
 }
 
 bool SoftwareSerial::listen()
@@ -125,17 +124,25 @@ int SoftwareSerial::read()
     return -1;}
 
   // Read from "head"
+  noInterrupts();
   uint8_t d = _receive_buffer[_receive_buffer_head]; // grab next byte
   _receive_buffer_head = (_receive_buffer_head + 1) % _SS_MAX_RX_BUFF;
+  interrupts();
   return d;
 }  
 
 int SoftwareSerial::available()
 {
+int len;
+
   if (!isListening())
     return 0;
   
-  return (_receive_buffer_tail + _SS_MAX_RX_BUFF - _receive_buffer_head) % _SS_MAX_RX_BUFF;
+  noInterrupts();
+  len = (int) (_receive_buffer_tail + _SS_MAX_RX_BUFF - _receive_buffer_head) % _SS_MAX_RX_BUFF;
+  interrupts();
+  
+  return (len);
 }
 
 size_t SoftwareSerial::write(uint8_t b)
@@ -168,7 +175,6 @@ size_t SoftwareSerial::write(uint8_t b)
 
   delayMicroseconds(delay);
 
-
   // Write each of the 8 bits
   for (uint8_t i = 8; i > 0; --i)
   {
@@ -188,9 +194,10 @@ size_t SoftwareSerial::write(uint8_t b)
     *reg |= reg_mask;
   
   interrupts();
-  //NRF_GPIOTE->INTENSET = _intMask;
-  
   delayMicroseconds(delay);  
+
+  //NRF_GPIOTE->INTENSET = _intMask;
+  //delayMicroseconds(delay);  
   
   return 1;
 }
@@ -236,16 +243,16 @@ void SoftwareSerial::recv()
     noInterrupts();
  
     // Wait approximately 1/2 of a bit width to "center" the sample
-       delayMicroseconds(_rx_delay_centering);
+    delayMicroseconds(_rx_delay_centering);
    
     // Read each of the 8 bits
     for (uint8_t i=8; i > 0; --i)
     {
         
-     delayMicroseconds(_rx_delay_intrabit);
-	 // nRF52 needs another delay less than 1 uSec to be better synchronized
-	 // with the highest baud rates
-	 __ASM volatile (
+      delayMicroseconds(_rx_delay_intrabit);
+	  // nRF52 needs another delay less than 1 uSec to be better synchronized
+	  // with the highest baud rates
+	  __ASM volatile (
        " NOP\n\t"
        " NOP\n"
 	   " NOP\n"
@@ -262,7 +269,7 @@ void SoftwareSerial::recv()
 	   " NOP\n"
 	   " NOP\n"
 	   " NOP\n"
-	 );
+	   );
 
       d >>= 1;
 
@@ -288,17 +295,17 @@ void SoftwareSerial::recv()
       _buffer_overflow = true;
     }
 
-    // skip the stop bit
-   delayMicroseconds(_rx_delay_stopbit); 
-
    interrupts();
    //NRF_GPIOTE->INTENSET = _intMask;  
+
+   // skip the stop bit
+   delayMicroseconds(_rx_delay_stopbit); 
   }
 }
 
 uint32_t SoftwareSerial::rx_pin_read()
 { 
-  return *_receivePortRegister & digitalPinToBitMask(_receivePin);
+  return (*_receivePortRegister & digitalPinToBitMask(_receivePin));
 }
 
 /* static */
