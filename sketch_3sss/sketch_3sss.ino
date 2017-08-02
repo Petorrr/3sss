@@ -55,8 +55,10 @@
 #define MSG_CHANNEL_SEARCH_TIMEOUT_ID ((byte)0x44)
 #define MSG_OPEN_CHANNEL_ID           ((byte)0x4B)
 #define MSG_BROADCAST_DATA_ID         ((byte)0x4E)
+#define MSG_ACKNOWLEDGE_DATA_ID       ((byte)0x4F)
 #define MSG_CHANNEL_RESPONSE          ((byte)0x40)
 #define MSG_TX_EVENT                  ((byte)0x03)
+#define MSG_CALIBRATION_REQUEST       ((byte)0xAA)
 
 // ANT Channel Type Codes
 #define CHANNEL_TYPE_BIDIRECTIONAL_RECEIVE    0x00
@@ -96,6 +98,7 @@ static byte           AntPedalPower;
 static byte           AntCadence;
 static word           AntAccuPower;
 static word           AntPower;
+static boolean        AntCalibration = false;
 
 // ANT message processor
 static boolean        MsgSync = false;
@@ -110,6 +113,7 @@ static byte           SendCount = 0;
 static void readSensorsTask();
 
 static void broadcastBikePower (void);
+static void broadcastCalibration (boolean success, word calibrationVal);
 static void antSetup();
 
 static void AP2reset (void);
@@ -217,19 +221,29 @@ word     execMillis;
   //Serial.println (piezoV);
   //Serial.println (piezoMax);
 
-  // Simulate ANT Power
-  AntPedalPower = 50;
-  AntCadence = 93;
-  AntPower = 300 + random (-25, 100);
-  AntAccuPower += AntPower;
-  //sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
-  //Serial.println (TmpBuf);
+  // Broadcast ANT Power data message @ 4 Hz updates
   if ((MainCount % 5) == 0)
+  {
+    AntPedalPower = 50;
+    AntCadence = 93;
+    AntPower = 300 + random (-25, 100);
+    AntAccuPower += AntPower;
     broadcastBikePower();
-
+    //sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
+    //Serial.println (TmpBuf);
+  }
+ 
   // Run ANT RX parser check with no timeout for incoming requests
   ANTreceive (0);
 
+  // Check for an ANT Calibration request
+  if (AntCalibration)
+  {
+    AntCalibration = false;
+    //broadcastCalibration (true, hx711.read_average (10));
+    broadcastCalibration (true, Hx711SensorVal + random (0, 100));
+  }
+  
   // Run this task at 20 Hz
   execMillis = millis() - startMillis;
   if (execMillis < 50)
@@ -310,7 +324,7 @@ static void antSetup()
 }
 
 // *****************************************************************************
-// ANT stack message parsing
+// ANT Broadcast messages; Bike Power
 // *****************************************************************************
 static void broadcastBikePower (void)
 {
@@ -335,6 +349,34 @@ uint8_t buf[13];
   ANTreceive (ANT_RX_MAX_TIMEOUT);
 }
 
+// *****************************************************************************
+// ANT Broadcast messages; Calibration
+// *****************************************************************************
+static void broadcastCalibration (boolean success, word calibrationVal)
+{
+uint8_t buf[13];
+
+  // Fill ANT Calibration data buffer with data
+  buf[0] = MSG_TX_SYNC;
+  buf[1] = 0x09;
+  buf[2] = MSG_BROADCAST_DATA_ID;
+  buf[3] = ANT_CHANNEL_NR;
+  buf[4] = 0x01;    // Data Page
+  if (success)
+    buf[5] = 0xAC;
+  else
+    buf[5] = 0xAF;
+  buf[6] = 0xFF;
+  buf[7] = 0xFF;
+  buf[8] = 0xFF;
+  buf[9] = 0xFF;
+  buf[10] = lowByte (calibrationVal);
+  buf[11] = highByte (calibrationVal);
+  buf[12] = checkSum(buf, 12);
+  ANTsend (buf,13);
+
+  ANTreceive (ANT_RX_MAX_TIMEOUT);
+}
 // *****************************************************************************
 // ANT AP2 hard reset function
 // *****************************************************************************
@@ -521,6 +563,15 @@ static void ANTrxProcess (void)
         Serial.print ("ERR: ");
         Serial.println(MsgBuf[5], HEX);
       }  
+    }
+  }
+  else if (MsgBuf[2] == MSG_ACKNOWLEDGE_DATA_ID)
+  {
+    // Check for Calibration Message requests
+    if (MsgBuf[5] == MSG_CALIBRATION_REQUEST)
+    {
+      AntCalibration = true;
+      Serial.println("Calibration Request");
     }
   }
 }
