@@ -9,6 +9,14 @@
 // *****************************************************************************
 // DEFINITIONS Section
 // *****************************************************************************
+// Hardware and Product definitions
+#define HARDWARE_REVISION   ((byte) 0x01)
+#define MANUFACTURER_ID     ((word) 0x00FF)
+#define MODEL_NUMBER        ((word) 3555)
+#define SW_MAIN_REVISION    1
+#define SW_SUB_REVISION     2
+
+// Sensor and input definitions
 #define STRING_BUF_SIZE     80
 #define PIEZO_BUF_SIZE      20
 #define HX711_BUF_SIZE      20
@@ -43,22 +51,29 @@
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
 #define ANT_RX_MAX_TIMEOUT            100 // In milliseconds
-// ANT Transmit Message definitions
-#define MSG_TX_SYNC                   ((byte)0xA4)
-#define MSG_SYSTEM_RESET_ID           ((byte)0x4A)
-#define MSG_NETWORK_KEY_ID            ((byte)0x46)
-#define MSG_ASSIGN_CHANNEL_ID         ((byte)0x42)
-#define MSG_CHANNEL_ID_ID             ((byte)0x51)
-#define MSG_CHANNEL_RADIO_FREQ_ID     ((byte)0x45)
-#define MSG_CHANNEL_MESG_PERIOD_ID    ((byte)0x43)
-#define MSG_RADIO_TX_POWER_ID         ((byte)0x47)
-#define MSG_CHANNEL_SEARCH_TIMEOUT_ID ((byte)0x44)
-#define MSG_OPEN_CHANNEL_ID           ((byte)0x4B)
-#define MSG_BROADCAST_DATA_ID         ((byte)0x4E)
-#define MSG_ACKNOWLEDGE_DATA_ID       ((byte)0x4F)
-#define MSG_CHANNEL_RESPONSE          ((byte)0x40)
-#define MSG_TX_EVENT                  ((byte)0x03)
-#define MSG_CALIBRATION_REQUEST       ((byte)0xAA)
+// ANT Transmit Message & Msg ID definitions
+#define MSG_TX_SYNC                   ((byte) 0xA4)
+#define MSG_SYSTEM_RESET_ID           ((byte) 0x4A)
+#define MSG_NETWORK_KEY_ID            ((byte) 0x46)
+#define MSG_ASSIGN_CHANNEL_ID         ((byte) 0x42)
+#define MSG_CHANNEL_ID_ID             ((byte) 0x51)
+#define MSG_CHANNEL_RADIO_FREQ_ID     ((byte) 0x45)
+#define MSG_CHANNEL_MESG_PERIOD_ID    ((byte) 0x43)
+#define MSG_RADIO_TX_POWER_ID         ((byte) 0x47)
+#define MSG_CHANNEL_SEARCH_TIMEOUT_ID ((byte) 0x44)
+#define MSG_OPEN_CHANNEL_ID           ((byte) 0x4B)
+#define MSG_BROADCAST_DATA_ID         ((byte) 0x4E)
+#define MSG_ACKNOWLEDGE_DATA_ID       ((byte) 0x4F)
+
+#define MSG_CHANNEL_RESPONSE          ((byte) 0x40)
+#define MSG_TX_EVENT                  ((byte) 0x03)
+#define MSG_CALIBRATION_REQUEST       ((byte) 0xAA)
+
+// Define Data Pages
+#define DP_CALIBRATION_REQ            ((byte) 0x01)
+#define DP_STANDARD_POWER_ONLY        ((byte) 0x10)
+#define DP_MANUFACTURER_INFO          ((byte) 0x50)
+#define DP_PRODUCT_INFO               ((byte) 0x51)
 
 // ANT Channel Type Codes
 #define CHANNEL_TYPE_BIDIRECTIONAL_RECEIVE    0x00
@@ -72,7 +87,7 @@
 // GLOBAL Variables Section
 // *****************************************************************************
 static char TmpBuf [STRING_BUF_SIZE];
-static byte MainCount = 0;
+static word MainCount = 0;
 
 // Piezo sensor variables
 static word PiezoBuf [PIEZO_BUF_SIZE];
@@ -94,18 +109,21 @@ static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 static SoftwareSerial AntSerial = SoftwareSerial(AP2_RX_PIN, AP2_TX_PIN, false);
 // ANT Developer key, if you want to connect to ANT+, you must get the key from thisisant.com
 static const byte     NETWORK_KEY[] = {0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45};
+
+// ANT TX messages processor variables
 static byte           AntPedalPower;
 static byte           AntCadence;
 static word           AntAccuPower;
 static word           AntPower;
-static boolean        AntCalibration = false;
+static byte           SendCount = 0;
+static byte           UpdateEventCount = 0;
 
-// ANT message processor
+// ANT RX messages processor variables
 static boolean        MsgSync = false;
 static byte           MsgIndex = 0;
 static byte           MsgLength = 0;
 static byte           MsgBuf [ANT_RXBUF_SIZE];
-static byte           SendCount = 0;
+static boolean        AntCalibration = false;
 
 // *****************************************************************************
 // Local Function prototypes 
@@ -114,6 +132,9 @@ static void readSensorsTask();
 
 static void broadcastBikePower (void);
 static void broadcastCalibration (boolean success, word calibrationVal);
+static void broadcastMfg (void);
+static void broadcastProduct (void);
+
 static void antSetup();
 
 static void AP2reset (void);
@@ -194,6 +215,8 @@ uint32_t startMillis;
 word     execMillis;
 
   // Main loop for serial output and debugging tasks:
+  
+  // Setup and maintain loop timing and counter, blinky
   startMillis = millis();
   MainCount++;
   // Toggle Run Led every 500 msec
@@ -221,21 +244,44 @@ word     execMillis;
   //Serial.println (piezoV);
   //Serial.println (piezoMax);
 
-  // Broadcast ANT Power data message @ 4 Hz updates
+  // Broadcast ANT data messages @ 4 Hz update intervals
   if ((MainCount % 5) == 0)
   {
-    AntPedalPower = 50;
-    AntCadence = 93;
-    AntPower = 300 + random (-25, 100);
-    AntAccuPower += AntPower;
-    broadcastBikePower();
-    //sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
-    //Serial.println (TmpBuf);
+    // Check for an ANT Calibration request
+    if (AntCalibration)
+    {
+      AntCalibration = false;
+      //broadcastCalibration (true, hx711.read_average (10));
+      broadcastCalibration (true, Hx711SensorVal + random (0, 100));
+    }
+    // Interleave Power broadcast every 4 messages
+    else if ((SendCount % 5) != 4)
+    {
+      AntPedalPower = 50;
+      AntCadence = 93;
+      AntPower = 300 + random (-25, 100);
+      AntAccuPower += AntPower;
+      broadcastBikePower();
+      UpdateEventCount++;
+      //sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
+      //Serial.println (TmpBuf);
+    }
+    // Interleave every 5th message with either Manufacturer Info and Product Info
+    else
+    {
+       if ((SendCount % 2) == 0)
+         broadcastMfg();
+       else
+         broadcastProduct();   
+    }
+    // Update the TX send/interleave counter
+    SendCount++;
   }
- 
+  
   // Run ANT RX parser check with no timeout for incoming requests
   ANTreceive (0);
 
+#if 0
   // Check for an ANT Calibration request
   if (AntCalibration)
   {
@@ -243,6 +289,7 @@ word     execMillis;
     //broadcastCalibration (true, hx711.read_average (10));
     broadcastCalibration (true, Hx711SensorVal + random (0, 100));
   }
+#endif
   
   // Run this task at 20 Hz
   execMillis = millis() - startMillis;
@@ -335,8 +382,8 @@ uint8_t buf[13];
   buf[1] = 0x09;
   buf[2] = MSG_BROADCAST_DATA_ID;
   buf[3] = ANT_CHANNEL_NR;
-  buf[4] = 0x10;
-  buf[5] = MainCount;
+  buf[4] = DP_STANDARD_POWER_ONLY;
+  buf[5] = UpdateEventCount;
   buf[6] = AntPedalPower;
   buf[7] = AntCadence;
   buf[8] = lowByte (AntAccuPower);
@@ -361,7 +408,7 @@ uint8_t buf[13];
   buf[1] = 0x09;
   buf[2] = MSG_BROADCAST_DATA_ID;
   buf[3] = ANT_CHANNEL_NR;
-  buf[4] = 0x01;    // Data Page
+  buf[4] = DP_CALIBRATION_REQ;
   if (success)
     buf[5] = 0xAC;
   else
@@ -377,6 +424,59 @@ uint8_t buf[13];
 
   ANTreceive (ANT_RX_MAX_TIMEOUT);
 }
+
+// *****************************************************************************
+// ANT Broadcast messages; Manufacturer
+// *****************************************************************************
+static void broadcastMfg (void)
+{
+uint8_t buf[13];
+
+  // Fill ANT Manufacturer data buffer with data
+  buf[0] = MSG_TX_SYNC;
+  buf[1] = 0x09;
+  buf[2] = MSG_BROADCAST_DATA_ID;
+  buf[3] = ANT_CHANNEL_NR;
+  buf[4] = DP_MANUFACTURER_INFO;
+  buf[5] = 0xFF;
+  buf[6] = 0xFF;
+  buf[7] = HARDWARE_REVISION;
+  buf[8] = lowByte (MANUFACTURER_ID);
+  buf[9] = highByte (MANUFACTURER_ID);
+  buf[10] = lowByte (MODEL_NUMBER);
+  buf[11] = highByte (MODEL_NUMBER);
+  buf[12] = checkSum(buf, 12);
+  ANTsend (buf,13);
+
+  ANTreceive (ANT_RX_MAX_TIMEOUT);
+}
+
+// *****************************************************************************
+// ANT Broadcast messages; Product Info
+// *****************************************************************************
+static void broadcastProduct (void)
+{
+uint8_t buf[13];
+
+  // Fill ANT Manufacturer data buffer with data
+  buf[0] = MSG_TX_SYNC;
+  buf[1] = 0x09;
+  buf[2] = MSG_BROADCAST_DATA_ID;
+  buf[3] = ANT_CHANNEL_NR;
+  buf[4] = DP_PRODUCT_INFO;
+  buf[5] = 0xFF;
+  buf[6] = SW_SUB_REVISION;
+  buf[7] = SW_MAIN_REVISION;
+  buf[8] = 0xFF;
+  buf[9] = 0xFF;
+  buf[10] = 0xFF;
+  buf[11] = 0xFF;
+  buf[12] = checkSum(buf, 12);
+  ANTsend (buf,13);
+
+  ANTreceive (ANT_RX_MAX_TIMEOUT);
+}
+
 // *****************************************************************************
 // ANT AP2 hard reset function
 // *****************************************************************************
@@ -496,23 +596,9 @@ static void ANTrxProcess (void)
     {
       if (MsgBuf[5] == MSG_TX_EVENT)
       {
+        // Toggle the communication LED on active transmissions
         digitalWrite(LED_BLUE, !digitalRead (LED_BLUE));
         Serial.println("TX success");
-#if 0
-        if (SendCount < 4)
-        {
-          //broadcastBikePower();
-          SendCount++;
-          //Serial.println("Crank Torque");
-        }
-        else if (SendCount == 4)
-        {
-          //broadcastBikePower();
-          //cranktorque();
-          SendCount = 0;
-          //Serial.println("Basic Power");
-        }
-#endif        
       }
     }
     else
