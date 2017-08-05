@@ -1,7 +1,6 @@
 // *****************************************************************************
 // INCLUDES Section
 // *****************************************************************************
-//#include <Q2HX711.h>
 #include <HX711.h>
 #include <stdio.h>
 #include "src\SoftwareSerial.h"
@@ -9,6 +8,14 @@
 // *****************************************************************************
 // DEFINITIONS Section
 // *****************************************************************************
+#define DEBUG               1
+#if DEBUG ==1
+#define DEBUG_MAIN_PROCESS  1
+#define DEBUG_ANT_TX        1
+#define DEBUG_ANT_RX        1
+#endif
+#define ANT_SIMULATION      0
+
 // Hardware and Product definitions
 #define HARDWARE_REVISION   ((byte) 0x01)
 #define MANUFACTURER_ID     ((word) 0x00FF)
@@ -22,9 +29,17 @@
 #define HX711_BUF_SIZE      20
 #define HX711_DATA_PIN      (7)
 #define HX711_CLOCK_PIN     (11)
+#define FORCE_SAMPLES_AVG   5
+#define FORCE_SCALE_FACTOR  ((float) 500 /(float) 100000)
 #define ANA_RES_BITS        14
 #define ANA_INP_RANGE       16384
 #define ANA_VOLT_REF        (float) 3.6
+#define ANA_BATT_VOLT_CH    (A7)
+#define BATTERY_NEW         1
+#define BATTERY_GOOD        2
+#define BATTERY_OK          3
+#define BATTERY_LOW         4
+#define BATTERY_CRITICAL    5
 
 // ANT AP2 Interface definitions
 #define AP2_TX_PIN          (4)
@@ -74,6 +89,7 @@
 #define DP_STANDARD_POWER_ONLY        ((byte) 0x10)
 #define DP_MANUFACTURER_INFO          ((byte) 0x50)
 #define DP_PRODUCT_INFO               ((byte) 0x51)
+#define DP_BATTERY_INFO               ((byte) 0x52)
 
 // ANT Channel Type Codes
 #define CHANNEL_TYPE_BIDIRECTIONAL_RECEIVE    0x00
@@ -88,6 +104,9 @@
 // *****************************************************************************
 static char TmpBuf [STRING_BUF_SIZE];
 static word MainCount = 0;
+static word BatteryVoltage = 0;
+static byte BatteryStatus;
+static long TotalSeconds;
 
 // Piezo sensor variables
 static word PiezoBuf [PIEZO_BUF_SIZE];
@@ -102,7 +121,6 @@ static long Hx711Buf [HX711_BUF_SIZE];
 static byte Hx711Index = 0;
 static long Hx711SensorVal = 0;
 // Construct the Loadcell Amplifier object
-//Q2HX711 hx711(hx711_data_pin, hx711_clock_pin);
 static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 
 // ANT communication data
@@ -134,6 +152,7 @@ static void broadcastBikePower (void);
 static void broadcastCalibration (boolean success, word calibrationVal);
 static void broadcastMfg (void);
 static void broadcastProduct (void);
+static void broadcastBatteryInfo (void);
 
 static void antSetup();
 
@@ -211,6 +230,8 @@ byte  i;
 long  piezoVal;
 long  piezoMax;
 float piezoV;
+long  forceBufAvg;
+long  forceBufMax;
 uint32_t startMillis;
 word     execMillis;
 
@@ -222,8 +243,11 @@ word     execMillis;
   // Toggle Run Led every 500 msec
   if (MainCount % 10 == 0)
     digitalWrite(LED_BUILTIN, !digitalRead (LED_BUILTIN));
-  
-  // Calculate moving average of Piezo Sensor values (20 samples @ 20 Hz)
+  // Maintain Total Seconds counter
+  if (MainCount % 20 == 0)
+    TotalSeconds++;
+    
+  // Calculate moving average of Piezo Sensor values
   piezoVal = 0;
   piezoMax = 0;
   for (i = 0; i < PIEZO_BUF_SIZE; i++)
@@ -235,41 +259,70 @@ word     execMillis;
   piezoVal = piezoVal / PIEZO_BUF_SIZE;
   piezoV = (ANA_VOLT_REF * (float) piezoMax) / (float) ANA_INP_RANGE;
   
+  // Calculate moving average of Force buffer sensor values
+  forceBufAvg = 0;
+  forceBufMax = 0;
+  for (i = 0; i < HX711_BUF_SIZE; i++)
+  {
+    forceBufAvg += Hx711Buf [i];
+    if (Hx711Buf [i] > forceBufMax)
+      forceBufMax = Hx711Buf [i];
+  }
+  forceBufAvg = forceBufAvg / HX711_BUF_SIZE;
+   
   // Output serial data for debugging
+#if DEBUG_MAIN_PROCESS == 1
   //sprintf (TmpBuf, "Millis since start: %ul msec", millis());
   //sprintf (TmpBuf, "Piezo: %u; hx711 %u; ", (word) piezoMax, (word) Hx711SensorVal);
-  //sprintf (TmpBuf, "LC: %ul", Hx711SensorVal & 0x007FFFFF);
+  //sprintf (TmpBuf, "LC: %ul", forceBufAvg);
   //Serial.println (TmpBuf);
   //Serial.println (Hx711SensorVal & 0x007FFFFF);
   //Serial.println (piezoV);
   //Serial.println (piezoMax);
+#endif
 
   // Broadcast ANT data messages @ 4 Hz update intervals
-  if ((MainCount % 5) == 0)
+  if ((MainCount % 5) == 1)
   {
     // Check for an ANT Calibration request
     if (AntCalibration)
     {
-      AntCalibration = false;
-      //broadcastCalibration (true, hx711.read_average (10));
+#if ANT_SIMULATION == 1
       broadcastCalibration (true, Hx711SensorVal + random (0, 100));
+#else
+      // Tare offset the strain gauge values with averaged value
+      hx711.set_offset (forceBufAvg);
+      hx711.set_scale ((float) FORCE_SCALE_FACTOR);
+      broadcastCalibration (true, (word) (hx711.get_offset() >> 4));  
+#endif
+      AntCalibration = false;
     }
     // Interleave Power broadcast every 4 messages
     else if ((SendCount % 5) != 4)
     {
       AntPedalPower = 50;
       AntCadence = 93;
+#if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
+#else
+      AntPower = (word) (((float) forceBufAvg - (float) hx711.get_offset()) * (float) hx711.get_scale());
+#endif
       AntAccuPower += AntPower;
       broadcastBikePower();
       UpdateEventCount++;
-      //sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
-      //Serial.println (TmpBuf);
+#if DEBUG_MAIN_PROCESS == 1
+      sprintf (TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
+      Serial.println (TmpBuf);
+#endif
     }
-    // Interleave every 5th message with either Manufacturer Info and Product Info
+    // Interleave every 5th message with either Manufacturer Info and Product Info, and Battery Info
     else
     {
-       if ((SendCount % 2) == 0)
+       // Battery Info every 15 seconds
+       if ((TotalSeconds % 15) == 0)
+         broadcastBatteryInfo ();
+       // Every other 4 interleaves Manufacturer and Product Info
+       else if ((SendCount % 2) == 0)
          broadcastMfg();
        else
          broadcastProduct();   
@@ -281,16 +334,6 @@ word     execMillis;
   // Run ANT RX parser check with no timeout for incoming requests
   ANTreceive (0);
 
-#if 0
-  // Check for an ANT Calibration request
-  if (AntCalibration)
-  {
-    AntCalibration = false;
-    //broadcastCalibration (true, hx711.read_average (10));
-    broadcastCalibration (true, Hx711SensorVal + random (0, 100));
-  }
-#endif
-  
   // Run this task at 20 Hz
   execMillis = millis() - startMillis;
   if (execMillis < 50)
@@ -319,11 +362,24 @@ word     execMillis;
   if (hx711.is_ready())
   {
     Hx711SensorVal = hx711.read ();
-    Hx711Buf [Hx711Index] = Hx711SensorVal;
+    Hx711Buf [Hx711Index] = Hx711SensorVal & 0x007FFFFF;
     Hx711Index++;
     if (Hx711Index >= HX711_BUF_SIZE)
       Hx711Index = 0;
   }
+
+  // Battery monitoring
+  BatteryVoltage = (word) (((float) 100 * ANA_VOLT_REF * (float) analogRead (ANA_BATT_VOLT_CH)) / (float) ANA_INP_RANGE);
+  if (BatteryVoltage < 280)
+    BatteryStatus = BATTERY_CRITICAL;
+  else if (BatteryVoltage < 290)
+    BatteryStatus = BATTERY_LOW;
+  else if (BatteryVoltage < 305)
+    BatteryStatus = BATTERY_OK;
+  else if (BatteryVoltage < 310)
+    BatteryStatus = BATTERY_GOOD;
+  else
+   BatteryStatus = BATTERY_NEW;
 
   // Run this task at 100 Hz
   execMillis = millis() - startMillis;
@@ -371,7 +427,7 @@ static void antSetup()
 }
 
 // *****************************************************************************
-// ANT Broadcast messages; Bike Power
+// ANT Broadcast messages; Bike Power (Required)
 // *****************************************************************************
 static void broadcastBikePower (void)
 {
@@ -426,7 +482,7 @@ uint8_t buf[13];
 }
 
 // *****************************************************************************
-// ANT Broadcast messages; Manufacturer
+// ANT Broadcast messages; Manufacturer (Required)
 // *****************************************************************************
 static void broadcastMfg (void)
 {
@@ -452,13 +508,13 @@ uint8_t buf[13];
 }
 
 // *****************************************************************************
-// ANT Broadcast messages; Product Info
+// ANT Broadcast messages; Product Info (Required)
 // *****************************************************************************
 static void broadcastProduct (void)
 {
 uint8_t buf[13];
 
-  // Fill ANT Manufacturer data buffer with data
+  // Fill ANT Product info data buffer with data
   buf[0] = MSG_TX_SYNC;
   buf[1] = 0x09;
   buf[2] = MSG_BROADCAST_DATA_ID;
@@ -471,6 +527,36 @@ uint8_t buf[13];
   buf[9] = 0xFF;
   buf[10] = 0xFF;
   buf[11] = 0xFF;
+  buf[12] = checkSum(buf, 12);
+  ANTsend (buf,13);
+
+  ANTreceive (ANT_RX_MAX_TIMEOUT);
+}
+
+// *****************************************************************************
+// ANT Broadcast messages; Battery Info (Optional)
+// *****************************************************************************
+static void broadcastBatteryInfo (void)
+{
+uint8_t buf[13];
+long ticks;
+
+  // Fill ANT Battery info data buffer with data
+  buf[0] = MSG_TX_SYNC;
+  buf[1] = 0x09;
+  buf[2] = MSG_BROADCAST_DATA_ID;
+  buf[3] = ANT_CHANNEL_NR;
+  buf[4] = DP_BATTERY_INFO;
+  buf[5] = 0xFF;
+  buf[6] = 0xFF;                  // Battery identifier not used
+  ticks = TotalSeconds / 2;       // Runtime in 2 seconds units
+  buf[7] = (byte) (ticks & 0x000000FF);
+  ticks = ticks >> 8;
+  buf[8] = (byte) (ticks & 0x000000FF);
+  ticks = ticks >> 8;
+  buf[9] = (byte) (ticks & 0x000000FF);
+  buf[10] = BatteryVoltage % 100;
+  buf[11] = 0x80 | (BatteryStatus << 4) | (BatteryVoltage / 100);
   buf[12] = checkSum(buf, 12);
   ANTsend (buf,13);
 
@@ -527,10 +613,12 @@ uint32_t retry = 0;
     
   while (sbuflength > 0 && MsgIndex < ANT_RXBUF_SIZE)
   {
+#if DEBUG_ANT_RX == 1
     //Serial.print("sbuf: ");
     //Serial.print(sbuflength);
     //Serial.print(" msg: ");
     //Serial.print (AntSerial.peek(), HEX);
+#endif
     if (!MsgSync)
     {
       msg = AntSerial.read();
@@ -555,12 +643,14 @@ uint32_t retry = 0;
       MsgBuf[MsgIndex] = AntSerial.read();
       if (MsgIndex == MsgLength - 1)
       {
+#if DEBUG_ANT_RX == 1
         for (int i = 0 ; i < MsgLength ; i++)
         {
           Serial.print(MsgBuf[i], HEX);
           Serial.print(" ");
         }
         Serial.println(" ");
+#endif
         // Call the message parser for further action
         ANTrxProcess ();
         MsgSync = false;
@@ -598,11 +688,14 @@ static void ANTrxProcess (void)
       {
         // Toggle the communication LED on active transmissions
         digitalWrite(LED_BLUE, !digitalRead (LED_BLUE));
+#if DEBUG_ANT_RX == 1
         Serial.println("TX success");
+#endif
       }
     }
     else
     {
+#if DEBUG_ANT_RX
       switch (MsgBuf[4])
       {
         case MSG_NETWORK_KEY_ID:
@@ -649,6 +742,7 @@ static void ANTrxProcess (void)
         Serial.print ("ERR: ");
         Serial.println(MsgBuf[5], HEX);
       }  
+#endif
     }
   }
   else if (MsgBuf[2] == MSG_ACKNOWLEDGE_DATA_ID)
@@ -657,7 +751,9 @@ static void ANTrxProcess (void)
     if (MsgBuf[5] == MSG_CALIBRATION_REQUEST)
     {
       AntCalibration = true;
+#if DEBUG_ANT_RX == 1
       Serial.println("Calibration Request");
+#endif
     }
   }
 }
@@ -669,17 +765,23 @@ static void ANTsend (uint8_t buf[], int length)
 {
  int i;
  
+#if DEBUG_ANT_TX == 1
    Serial.print ("ANTsend:");
+#endif
    // Send length buffer bytes to AntSerial
    for (i = 0 ; i < length ; i++)
    {
+#if DEBUG_ANT_TX == 1
      Serial.print(buf[i], HEX);
      Serial.print(" ");
+#endif
      AntSerial.write (buf[i]);
    }
    // Wait for Clear to Send signal
    AP2waitCts ();
+#if DEBUG_ANT_TX == 1
    Serial.println("");
+#endif
 }
 
 // *****************************************************************************
