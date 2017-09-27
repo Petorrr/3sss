@@ -1,2 +1,2 @@
 # 3sss
-Skate Sensing System
+Sports Sensing System
