@@ -6,8 +6,11 @@
 
 #ifdef NRF5
 #include "src\SoftwareSerial.h"
-#else
+#endif
+#ifdef TEENSYDUINO
+#include <EEPROM.h>
 #include <IntervalTimer.h>
+#include <SPI.h>
 #endif
 
 // *****************************************************************************
@@ -19,12 +22,12 @@
 #define MSEC_TO_TICKS(x)    (word) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
 
 #define DEBUG               1
-#if DEBUG ==1
+#if DEBUG == 1
 #define DEBUG_MAIN_PROCESS  1
 #define DEBUG_ANT_TX        1
 #define DEBUG_ANT_RX        1
 #endif
-#define ANT_SIMULATION      0
+#define ANT_SIMULATION      1
 
 // Hardware and Product definitions
 #define HARDWARE_REVISION   ((byte) 0x01)
@@ -33,22 +36,36 @@
 #define SW_MAIN_REVISION    1
 #define SW_SUB_REVISION     2
 
-#ifndef NRF5
-#define LED_BLUE            LED_BUILTIN
+#ifdef TEENSYDUINO
+#define LED_COMM            LED_BUILTIN
 #endif
 
 // Sensor and input definitions
 #define STRING_BUF_SIZE     80
 #define PIEZO_BUF_SIZE      20
 #define HX711_BUF_SIZE      20
+#ifdef NRF5
 #define HX711_DATA_PIN      (7)
 #define HX711_CLOCK_PIN     (11)
+#endif
+#ifdef TEENSYDUINO
+#define HX711_DATA_PIN      (3)
+#define HX711_CLOCK_PIN     (2)
+#endif
 #define FORCE_SAMPLES_AVG   5
 #define FORCE_SCALE_FACTOR  ((float) 500 /(float) 100000)
+#ifdef NRF5
 #define ANA_RES_BITS        14
 #define ANA_INP_RANGE       16384
 #define ANA_VOLT_REF        (float) 3.6
 #define ANA_BATT_VOLT_CH    (A7)
+#endif
+#ifdef TEENSYDUINO
+#define ANA_RES_BITS        12
+#define ANA_INP_RANGE       4096
+#define ANA_VOLT_REF        (float) 3.3
+#define ANA_BATT_VOLT_CH    (A7)
+#endif
 #define BATTERY_NEW         1
 #define BATTERY_GOOD        2
 #define BATTERY_OK          3
@@ -56,6 +73,7 @@
 #define BATTERY_CRITICAL    5
 
 // ANT AP2 Interface definitions
+#ifdef NRF5
 #define AP2_TX_PIN          (4)
 #define AP2_RX_PIN          (5)
 #define AP2_BR1_PIN         (28)
@@ -65,6 +83,15 @@
 #define AP2_SUSPEND_PIN     (14)
 #define AP2_SLEEP_PIN       (16)
 #define AP2_RTS_PIN         (15)
+#endif
+#ifdef TEENSYDUINO
+#define AP2_TX_PIN          (10)
+#define AP2_RX_PIN          (9)
+#define AP2_RST_PIN         (15)
+#define AP2_SUSPEND_PIN     (7)
+#define AP2_SLEEP_PIN       (6)
+#define AP2_RTS_PIN         (16)
+#endif
 
 // ANT Bike Power Profile definitions
 #define ANT_PUBLIC_NETWORK  0x00
@@ -79,7 +106,7 @@
 
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
-#define ANT_RX_MAX_TIMEOUT            100 // In milliseconds
+#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
 // ANT Transmit Message & Msg ID definitions
 #define MSG_TX_SYNC                   ((byte) 0xA4)
 #define MSG_SYSTEM_RESET_ID           ((byte) 0x4A)
@@ -122,7 +149,9 @@ static word BatteryVoltage = 0;
 static byte BatteryStatus;
 static long TotalSeconds;
 
+#ifdef TEENSYDUINO
 static IntervalTimer SensorTimer;
+#endif
 
 // Piezo sensor variables
 static word PiezoBuf [PIEZO_BUF_SIZE];
@@ -142,7 +171,8 @@ static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 // ANT communication data
 #ifdef NRF5
 static SoftwareSerial AntSerial = SoftwareSerial(AP2_RX_PIN, AP2_TX_PIN, false);
-#else
+#endif
+#ifdef TEENSYDUINO
 #define AntSerial Serial1
 #endif
 // ANT Developer key, if you want to connect to ANT+, you must get the key from thisisant.com
@@ -200,15 +230,20 @@ void setup()
 {
   // Put setup code here, to run once:
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(LED_BLUE, OUTPUT);
+  pinMode(LED_COMM, OUTPUT);
 
   Serial.begin(115200);
   Serial.println ("Hello 3sss");
 
+  // Initialize the SPI and ADXL interfaces
+
+  
   // Initialize the AP2 interface pins
+#ifdef AP2_BR1_PIN
   pinMode (AP2_BR1_PIN, OUTPUT);
   pinMode (AP2_BR2_PIN, OUTPUT);
   pinMode (AP2_BR3_PIN, OUTPUT);
+#endif
   digitalWrite(AP2_RST_PIN, 1);
   pinMode (AP2_RST_PIN, OUTPUT);
   pinMode (AP2_SUSPEND_PIN, OUTPUT);
@@ -216,14 +251,16 @@ void setup()
   pinMode (AP2_RTS_PIN, INPUT);
 
   // Baudrate selection to 38400 baud
+#ifdef AP2_BR1_PIN
   digitalWrite(AP2_BR1_PIN, 1);
   digitalWrite(AP2_BR2_PIN, 0);
   digitalWrite(AP2_BR3_PIN, 0);
+#endif
   digitalWrite(AP2_RST_PIN, 1);
   digitalWrite(AP2_SLEEP_PIN, 0);
   digitalWrite(AP2_SUSPEND_PIN, 1);
 
-  // Initalize SoftwareSerial
+  // Initalize Serial1 or SoftwareSerial
   AntSerial.begin(38400);
   // Stabilize for a while
   delay (10);
@@ -238,7 +275,8 @@ void setup()
   // Create readSensors task using Scheduler to run in 'parallel' with main loop()
 #ifdef NRF5
   Scheduler.startLoop(readSensorsTask);
-#else
+#endif
+#ifdef TEENSYDUINO
   SensorTimer.begin (readSensorsTask, 10000);
 #endif
 }
@@ -257,7 +295,8 @@ void loop()
   long  forceBufMax;
   uint32_t startMillis;
   word     execMillis;
-
+  word  temp;
+  
   // Main loop for serial output and debugging tasks:
 
   // Setup and maintain loop timing and counter, blinky
@@ -300,7 +339,7 @@ void loop()
   //sprintf (TmpBuf, "LC: %ul", forceBufAvg);
   //Serial.println (TmpBuf);
   //Serial.println (Hx711SensorVal & 0x007FFFFF);
-  Serial.println (piezoV);
+  Serial.println (BatteryVoltage);
   //Serial.println (piezoMax);
 #endif
 
@@ -359,7 +398,7 @@ void loop()
   ANTreceive (0);
 
   // Run this task at 20 Hz
-  execMillis = millis() - startMillis;
+  execMillis = (word) (millis() - startMillis);
   if (execMillis < MAIN_LOOP_MILLIS)
     delay (MAIN_LOOP_MILLIS - execMillis);
 }
@@ -374,7 +413,6 @@ static void readSensorsTask()
   word     execMillis;
 
   startMillis = millis();
-
   // Read the value from the Piezo sensor into the sample buffer
   PiezoSensorVal = analogRead (PiezoSensorCh);
   PiezoBuf [PiezoIndex] = PiezoSensorVal;
@@ -714,7 +752,7 @@ static void ANTrxProcess (void)
       if (MsgBuf[5] == MSG_TX_EVENT)
       {
         // Toggle the communication LED on active transmissions
-        digitalWrite(LED_BLUE, !digitalRead (LED_BLUE));
+        digitalWrite(LED_COMM, !digitalRead (LED_COMM));
 #if DEBUG_ANT_RX == 1
         Serial.println("TX success");
 #endif
