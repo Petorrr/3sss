@@ -51,7 +51,12 @@ void ADXL362::begin(int16_t chipSelectPin) {
 //  turn on Measurement mode - required after reset
 // 
 void ADXL362::beginMeasure() {
-	byte temp = SPIreadOneRegister(0x2D);	// read Reg 2D before modifying for measure mode
+	byte temp = SPIreadOneRegister(0x2C);	// read Reg 2C for filter control
+	byte tempwrite = temp & 0xFC;			// select 12,5 Hz
+	SPIwriteOneRegister(0x2C, tempwrite);   // Write to FILTER_CTL_REG
+	delay(10);
+
+	temp = SPIreadOneRegister(0x2D);	// read Reg 2D before modifying for measure mode
 
 #ifdef ADXL362_DEBUG
 	Serial.print(  "Setting Measeurement Mode - Reg 2D before = "); 
@@ -59,7 +64,7 @@ void ADXL362::beginMeasure() {
 #endif
 
 	// turn on measurement mode
-	byte tempwrite = temp | 0x02;			// turn on measurement bit in Reg 2D
+	tempwrite = temp | 0x02;			  // turn on measurement bit in Reg 2D
 	SPIwriteOneRegister(0x2D, tempwrite); // Write to POWER_CTL_REG, Measurement Mode
 	delay(10);	
   
