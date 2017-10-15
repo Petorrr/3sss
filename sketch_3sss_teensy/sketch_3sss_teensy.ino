@@ -1,3 +1,4 @@
+// *****************************************************************************
 // INCLUDES Section
 // *****************************************************************************
 #include <stdio.h>
@@ -6,6 +7,7 @@
 
 #include <EEPROM.h>
 #include <IntervalTimer.h>
+#include <Snooze.h>
 #include <SPI.h>
 
 // *****************************************************************************
@@ -15,10 +17,14 @@
 #define MAIN_LOOP_MILLIS    50
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (word) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
-// Sensor tick timing definitions
-#define SENSOR_TICK_MILLIS      10
-#define SENSOR_TICKS_PER_SEC    (1000/SENSOR_TICK_MILLIS)
-#define MSEC_TO_SENSOR_TICKS(x) (word) (((uint32_t) (x)*(uint32_t) SENSOR_TICKS_PER_SEC)/(uint32_t) 1000)
+
+#define MAIN_LOOP_DELAY     0
+#define MAIN_LOOP_WFI       1
+#define MAIN_LOOP_SLEEP     2
+#define MAIN_LOOP_DEEPSLEEP 3
+#define MAIN_LOOP_HIBERNATE 4
+#define MAIN_LOOP_SETPOWER  MAIN_LOOP_WFI
+
 
 // Debug settings definitions
 #define DEBUG               1
@@ -28,7 +34,6 @@
 #define DEBUG_ANT_RX        0
 #endif
 #define ANT_SIMULATION      1
-#define STRING_BUF_SIZE     80
 
 // Hardware and Product definitions
 #define HARDWARE_REVISION   ((byte) 0x01)
@@ -45,6 +50,7 @@
 #define FORCE_SAMPLES_AVG   5
 #define FORCE_SCALE_FACTOR  ((float) 500 /(float) 100000)
 #define DEFAULT_FORCE_DIST  100     // in mm
+#define XYAXIS_FILTER       25      // new value for 25 %
 
 // ADXL362 interface
 #define DEFAULT_TEMP_OFFSET -77     // in counts
@@ -56,11 +62,10 @@
 #define ADXL362_CS_PIN      (15)
 #define ADXL362_SCK_PIN     (14)
 
-// Analog iputs interface/sensors
+// Analog inputs interface/sensors
 #define ANA_RES_BITS        12
 #define ANA_INP_RANGE       4096
-#define ANA_VOLT_REF        330
-#define ANA_BATT_VOLT_CH    (A7)
+#define ANA_BATT_VOLT_CH    (39)    // Use internal ref bandgap 'trick'
 #define BATTERY_NEW         1
 #define BATTERY_GOOD        2
 #define BATTERY_OK          3
@@ -71,13 +76,6 @@
 #define EE_START_ADDR       2
 #define EE_STRAIN_OFFSET    EE_START_ADDR + 0
 #define EE_TEMP_OFFSET      EE_START_ADDR + 4
-
-// Process state definitions
-#define CRANK_UP            0
-#define CRANK_FORWARD       1
-#define CRANK_DOWN          2
-#define CRANK_BACK          3
-#define CRANK_UNKNOWN       0xFF
 
 // ANT AP2 Interface definitions
 #define AP2_TX_PIN          (10)
@@ -105,7 +103,8 @@
 
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
-#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
+//#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
+#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 100 on Feather?)
 // ANT Transmit Message & Msg ID definitions
 #define MSG_TX_SYNC                   ((byte) 0xA4)
 #define MSG_SYSTEM_RESET_ID           ((byte) 0x4A)
@@ -142,22 +141,26 @@
 // *****************************************************************************
 // GLOBAL Variables Section
 // *****************************************************************************
-static char TmpBuf [STRING_BUF_SIZE];
 static word MainCount = 0;
 static word BatteryVoltage = 0;
 static byte BatteryStatus;
-static long TotalSeconds;
+static long TotalSeconds = 0;
 static IntervalTimer SensorTimer;
+static SnoozeUSBSerial usb;
+static SnoozeTimer TimerS;
+// configures the lc's 5v data buffer (OUTPUT, LOW) for low power
+static Snoozelc5vBuffer  LC5vBuffer;
+static SnoozeBlock Config_teensyLC(TimerS, usb, LC5vBuffer);
 
 // Bike Power processing variables
-static byte  CrankState = CRANK_UNKNOWN;
-static byte  PrevCrankState = CRANK_UNKNOWN;
-static word  CrankTicks = 0;
-static word  CrankTime = 0;
+static word  CrankXTicks = 0;
+static word  CrankXTime = 0;
+static word  CrankYTicks = 0;
+static word  CrankYTime = 0;
 static word  Cadence = 0;
-static float Force;
-static float Torque;
-static float Power;
+static word  Force;
+static word  Torque;
+static word  Power;
 static word  ForceDistance = DEFAULT_FORCE_DIST;
 
 // Loadcell, Strain Gauge Amplifier variables
@@ -172,11 +175,15 @@ static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 // ADXL362 interface variables
 static ADXL362 Adxl;
 static int16_t XValue;
+static int16_t XValueFilt;
+static int16_t XValuePrev;
 static int16_t YValue;
+static int16_t YValueFilt;
+static int16_t YValuePrev;
 static int16_t ZValue;
-static int16_t Temperature;
-static long    RealTemperature;
-static word    TempOffset = DEFAULT_TEMP_OFFSET;
+static int16_t AdxlTemperature;
+static long    AdxlRealTemperature;
+static word    AdxlTempOffset = DEFAULT_TEMP_OFFSET;
 
 // ANT communication data
 #define AntSerial Serial1
@@ -202,7 +209,11 @@ static boolean    AntCalibration = false;
 // *****************************************************************************
 // Local Function prototypes
 // *****************************************************************************
+static void handleDelayScenario(uint32_t startMillis);
 static void readSensorsTask();
+
+static uint32_t getInputVoltage();
+static void determineBatteryStatus();
 
 static void eepromGetConfig();
 static void eepromSetConfig();
@@ -247,7 +258,8 @@ byte temp;
 
   // Read the Configuration for the EPROM storage
   eepromGetConfig();
-  TempOffset = DEFAULT_TEMP_OFFSET;
+  //*** Only for testing
+  AdxlTempOffset = DEFAULT_TEMP_OFFSET;
   
   // Initialize the SPI and ADXL interfaces
   pinMode(ADXL362_CS_PIN, OUTPUT);
@@ -263,12 +275,14 @@ byte temp;
   Adxl.SPIwriteOneRegister(0x27, temp); // Write new reg value 
   // Map INT2 to AWAKE bit
   temp = Adxl.SPIreadOneRegister(0x2B); // Read current reg value
-  temp = temp | (0x40);                 // Map INT to AWAKE
+  temp = temp | (0x40);                 // Map INT2 to AWAKE
   Adxl.SPIwriteOneRegister(0x2B, temp); // Write new reg value 
-  
-  // After setting thresholds, start the measurement mode
+    // After setting thresholds, start the measurement mode
   Adxl.beginMeasure();
-  
+  // *** Only for testing
+  pinMode (20, INPUT);                  // INT2 AWAKE status
+
+
   // Initialize the AP2 interface pins
 #ifdef AP2_BR1_PIN
   pinMode(AP2_BR1_PIN, OUTPUT);
@@ -301,13 +315,22 @@ byte temp;
   // Setup and initialize the ANT network
   antSetup();
 
-  // Set the AD resolution to 14 bits
+  // Set the AD resolution as defined
   analogReadResolution(ANA_RES_BITS);
+  // 39=bandgap ref (PMC_REGSC |= PMC_REGSC_BGBE), used for Batt Voltage
+  PMC_REGSC |= PMC_REGSC_BGBE; 
 
+  //********************************************************
+  //   Set Low Power Timer wake up in milliseconds.
+  //********************************************************
+#if MAIN_LOOP_SETPOWER >= MAIN_LOOP_SLEEP
+  TimerS.setTimer(MAIN_LOOP_MILLIS);
+#endif
+#if 0
   // Create readSensors task using Scheduler to run in 'parallel' with main loop()
   SensorTimer.begin(readSensorsTask, (SENSOR_TICK_MILLIS * 1000));
+#endif
 }
-
 
 // *****************************************************************************
 // Main process loop task
@@ -318,23 +341,21 @@ byte  i;
 long  forceBufAvg;
 long  forceBufMax;
 uint32_t startMillis;
-word     execMillis;
-long tempX, tempY, tempZ;
-
-   
-  // Main loop for serial output and debugging tasks:
+word  forceCnts;
 
   // Setup and maintain loop timing and counter, blinky
   startMillis = millis();
   MainCount++;
-  // Toggle Run Led every 500 msec on, will be turned off by sensorstask
-  if ((MainCount % MSEC_TO_TICKS(500)) == 0)
-    digitalWrite(LED_BUILTIN, HIGH);
-
-  // Maintain Total Seconds counter
+  // Maintain Total Seconds counter and blinky 
   if ((MainCount % MSEC_TO_TICKS(1000)) == 0)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
     TotalSeconds++;
+  }
 
+  // Read all Sensor data
+  readSensorsTask ();
+  
   // Calculate moving average of Force buffer sensor values
   forceBufAvg = 0;
   forceBufMax = 0;
@@ -346,34 +367,16 @@ long tempX, tempY, tempZ;
   }
   forceBufAvg = forceBufAvg / HX711_BUF_SIZE;
   // Calculate Force, Torque and eventually Power
-  Force = ((float) forceBufAvg - (float) hx711.get_offset()) * (float) hx711.get_scale();
-  Torque = (Force * (float) ForceDistance) / (float) 1000;
-  Power = ((float) 0.105 * (float) Cadence * Torque) / (float) 10;
+  forceCnts = (word) abs(forceBufAvg - hx711.get_offset());
+  Force = (word) ((float) forceCnts * hx711.get_scale());
+  Torque = (Force * ForceDistance) / 1000;
+  Power = ((uint32_t) 105 * (uint32_t) Cadence * (uint32_t) Torque) / (uint32_t) 10000;
   
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  //sprintf(TmpBuf, "Millis since start: %ul msec", millis());
-  //sprintf(TmpBuf, "LC: %ul", forceBufAvg);
-  //Serial.println(TmpBuf);
-  //Serial.println(Hx711SensorVal & 0x007FFFFF);
-  //noInterrupts();
-  //tempX = XValue; tempY = YValue; tempZ = ZValue;
-  //interrupts();
-  switch (CrankState)
-  {
-    case CRANK_UP: Serial.print ("CRANK_UP: "); break;
-    case CRANK_FORWARD: Serial.print ("CRANK_FWD: "); break;
-    case CRANK_DOWN: Serial.print ("CRANK_DN: "); break;
-    case CRANK_BACK: Serial.print ("CRANK_BWD: "); break;
-    case CRANK_UNKNOWN: Serial.print ("CRANK_UNKNOWN: "); break;
-  }
-  //Serial.print(CrankState);
-  //Serial.print(' ');
-  //Serial.print(PrevCrankState);
-  Serial.print(' ');
-  Serial.println(Cadence);
-  pinMode (20, INPUT);
-  Serial.println (digitalRead(20));
+  //Serial.printf("%4d %4d %3u\n", XValueFilt, YValueFilt, Cadence);
+  Serial.printf("%4u %4u %4u %4u\n", Force, Torque, Power, Cadence);
+  //Serial.println (digitalRead(20));
 #endif
 
   // Broadcast ANT data messages @ 4 Hz update intervals
@@ -419,7 +422,13 @@ long tempX, tempY, tempZ;
     {
       // Battery Info every 15 seconds
       if ((TotalSeconds % 15) == 0)
+      {
+        determineBatteryStatus();
+        Serial.print(BatteryVoltage);
+        Serial.print(' ');
+        Serial.println(BatteryStatus);
         broadcastBatteryInfo();
+      }
       // Every other 4 interleaves Manufacturer and Product Info
       else if ((SendCount % 2) == 0)
         broadcastMfg();
@@ -432,22 +441,62 @@ long tempX, tempY, tempZ;
 
   // Run ANT RX parser check with no timeout for incoming requests
   ANTreceive(0);
-
-  // Run this task at 20 Hz
-  execMillis = (word) (millis() - startMillis);
-  if (execMillis < MAIN_LOOP_MILLIS)
-    delay (MAIN_LOOP_MILLIS - execMillis);
-}
-
-
-// *****************************************************************************
-// Sensors Input Task samples at 10 msec
-// *****************************************************************************
-static void readSensorsTask()
-{
   // Led off, to keep current usage low
   digitalWrite(LED_BUILTIN, LOW);
 
+  // At last handle the 'sleep' until next main cycle needed
+  handleDelayScenario(startMillis);
+}
+
+// *****************************************************************************
+// Handle best delay scenario for Power setting optimization
+// *****************************************************************************
+static void handleDelayScenario(uint32_t startMillis)
+{
+word execMillis;
+  
+  // Determine execution time, and delay for the remainder
+  execMillis = (word) (millis() - startMillis);
+
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_DELAY
+  if (execMillis < MAIN_LOOP_MILLIS)
+    delay (MAIN_LOOP_MILLIS - execMillis);
+#endif
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_WFI
+  if (execMillis < MAIN_LOOP_MILLIS)
+  {
+    while ((millis() - startMillis) < MAIN_LOOP_MILLIS)
+      __asm__("wfi");
+  }
+#endif
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_SLEEP
+  if (execMillis < MAIN_LOOP_MILLIS)
+  {
+    TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
+    Snooze.sleep(Config_teensyLC);
+  }
+#endif
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_DEEPSLEEP
+  if (execMillis < MAIN_LOOP_MILLIS)
+  {
+    TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
+    Snooze.deepSleep(Config_teensyLC);
+  }
+#endif
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_HIBERNATE
+  if (execMillis < MAIN_LOOP_MILLIS)
+  {
+    TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
+    Snooze.hibernate(Config_teensyLC);
+  }
+#endif
+}
+
+// *****************************************************************************
+// Sensors Input Task calculations
+// *****************************************************************************
+static void readSensorsTask()
+{
   // Read the value from the HX711 sensor into the sample buffer
   if (hx711.is_ready())
   {
@@ -457,12 +506,98 @@ static void readSensorsTask()
     if (Hx711Index >= HX711_BUF_SIZE)
       Hx711Index = 0;
   }
+// Simulation
+  else
+  {
+    Hx711SensorVal = 35000 + random (-2500, 10000);
+    Hx711Buf [Hx711Index] = Hx711SensorVal & 0x007FFFFF;
+    Hx711Index++;
+    if (Hx711Index >= HX711_BUF_SIZE)
+    {
+      Hx711Index = 0;
+      // Tare offset the strain gauge values with averaged value
+      hx711.set_offset(Hx711SensorVal);
+    }
+  }
+// End Simulation
 
   // Read all three acceleration axes in burst to ensure all measurements correspond to same sample time
-  Adxl.readXYZTData(XValue, YValue, ZValue, Temperature);  
+  Adxl.readXYZTData(XValue, YValue, ZValue, AdxlTemperature);  
   // Calculate the Temperature in XX.XXX
-  RealTemperature = ((long) Temperature - (long) TempOffset) * (long) 65;
+  AdxlRealTemperature = ((long) AdxlTemperature - (long) AdxlTempOffset) * (long) 65;
+
+  // Filter the X and Y Values
+  XValueFilt = (int16_t) ((((long) XValue * (long) XYAXIS_FILTER) + ((long) XValueFilt * (long) (100 - XYAXIS_FILTER))) / (long) 100);
+  YValueFilt = (int16_t) ((((long) YValue * (long) XYAXIS_FILTER) + ((long) YValueFilt * (long) (100 - XYAXIS_FILTER))) / (long) 100);
+
+  // Maintain Crank timing
+  CrankXTicks++;
+  CrankYTicks++;
+  // Next check on X state change through 0 
+  if (XValueFilt < 0 && XValuePrev > 0)
+  {
+    CrankXTime = CrankXTicks * MAIN_LOOP_MILLIS;
+    CrankXTicks = 0;
+  }
+  // Next check on Y state change through 0 
+  if (YValueFilt < 0 && YValuePrev > 0)
+  {
+    CrankYTime = CrankYTicks * MAIN_LOOP_MILLIS;
+    CrankYTicks = 0;
+  }
   
+  // Reset to 0 when longer than 5 seconds to make a full cycle
+  if (CrankXTicks > MSEC_TO_TICKS (5000) || CrankYTicks > MSEC_TO_TICKS (5000))
+  {
+    CrankXTicks = 0;
+    CrankXTime = 0;
+    CrankYTicks = 0;
+    CrankYTime = 0;
+  }
+
+  // Calculate Cadence only when above a certain time to prevent too high values
+  // Max Cadence is 60000/(400/2) = 300
+  if ((CrankXTime + CrankYTime) > 400)
+    Cadence = (word) 60000 / ((CrankXTime + CrankYTime) / 2);
+  else
+    Cadence = 0;
+  
+  // Store previous X, Y axis readings for next loop
+  XValuePrev = XValueFilt;
+  YValuePrev = YValueFilt;
+
+#if 0
+  // Maintain Crank timing
+  CrankTicks++;
+  // Calculate X degrees travel to the previous samples (~1000 cnts = 90.0 deg)
+  tempAbs = (word) abs (XValue - XValuePrev);
+  if (tempAbs < 1000)
+    XDeg = XDeg + (word) (((long) tempAbs * (long) 90) / (long) 100);
+  // Calculate Y degrees travel since previous sample (~1000 cnts = 90.0 deg)
+  tempAbs = (word) abs (YValue - YValuePrev);
+  if (tempAbs < 1000)
+    YDeg = YDeg + (word) (((long)tempAbs * (long) 90) / (long) 100);
+
+  // Averaged of X and Y axis should accumulate to above 360 degrees
+  CrankTime = CrankTicks * MAIN_LOOP_MILLIS;
+  deg = (XDeg + YDeg) / 2;
+  if (deg >= 3600 || CrankTime >= 2000)
+  {
+    CrankTicks = 0;
+    // Calculate Raw Cadence based on > 360 degrees in X and Y averaged
+    Cadence = (word) (((uint32_t) 60000 * (uint32_t) deg) / ((uint32_t) 3600 * (uint32_t) CrankTime));
+    XDeg = 0;
+    YDeg = 0;
+  }
+  
+  // Filter the Cadence
+  FilteredCadence = (Cadence * CADENCE_FILTER + FilteredCadence * (100 - CADENCE_FILTER)) / 100;
+  // Store previous X, Y axis readings for next loop
+  XValuePrev = XValue;
+  YValuePrev = YValue;
+#endif
+
+#if 0
   // Perform the X/Y state machine to determine Crank Speed/Cadence
   if (XValue > 900 && XValue < 1100 && YValue > -100 && YValue < 100)
     CrankState = CRANK_UP;
@@ -472,7 +607,7 @@ static void readSensorsTask()
     CrankState = CRANK_DOWN;
   else if (XValue > -100 && XValue < 100 && YValue > -1100 && YValue < -900)
     CrankState = CRANK_BACK;
-  
+
   // Maintain Crank timing
   CrankTicks++;
   // Next check on state change to UP  
@@ -480,28 +615,46 @@ static void readSensorsTask()
   if ((PrevCrankState == CRANK_BACK && CrankState == CRANK_UP) ||
       (PrevCrankState == CRANK_FORWARD && CrankState == CRANK_UP))
   {
-    CrankTime = CrankTicks;
+    CrankTime = CrankTicks * SENSOR_TICK_MILLIS;
     CrankTicks = 0;
-    // Calculate Cadence in ###.#
+    // Calculate Cadence
     Cadence = (word) 60000 / CrankTime;   
   }
   // Store last CrankState for next time
   PrevCrankState = CrankState;
-  
+#endif
+}
+
+// *****************************************************************************
+// Teensy LC Battery voltage determination using the 3.3V reference as basis
+// for Teensy LC, 3v3 input, only valid between 1.65V and 3.5V. Returns in millivolts.
+// *****************************************************************************
+uint32_t getInputVoltage()
+{ 
+uint32_t x;
+
+    x = analogRead(ANA_BATT_VOLT_CH);
+    return ((266*x*x + 2496026531 - 1431005 * x) / 342991) - 50;
+}
+
+// *****************************************************************************
+// Determine Battery Voltage and Status level
+// *****************************************************************************
+static void determineBatteryStatus()
+{
   // Battery monitoring
-  BatteryVoltage = (word) (((uint32_t) ANA_VOLT_REF * (uint32_t) analogRead (ANA_BATT_VOLT_CH)) / (uint32_t) ANA_INP_RANGE);
-  if (BatteryVoltage < 280)
+  BatteryVoltage = (word) getInputVoltage() / 10;
+  if (BatteryVoltage < 220)
     BatteryStatus = BATTERY_CRITICAL;
-  else if (BatteryVoltage < 290)
+  else if (BatteryVoltage < 240)
     BatteryStatus = BATTERY_LOW;
-  else if (BatteryVoltage < 305)
+  else if (BatteryVoltage < 260)
     BatteryStatus = BATTERY_OK;
-  else if (BatteryVoltage < 310)
+  else if (BatteryVoltage < 280)
     BatteryStatus = BATTERY_GOOD;
   else
     BatteryStatus = BATTERY_NEW;
 }
-
 
 // *****************************************************************************
 // EEPROM routines to read/write the configuration to/from non volatile memory
@@ -520,8 +673,8 @@ long templ;
              (long) EEPROM[EE_STRAIN_OFFSET + 2] << 8  |
              (long) EEPROM[EE_STRAIN_OFFSET + 3]);
     hx711.set_offset(templ);
-    TempOffset = ((long) EEPROM[EE_TEMP_OFFSET + 0] << 8  |
-                  (long) EEPROM[EE_TEMP_OFFSET + 1]);
+    AdxlTempOffset = ((long) EEPROM[EE_TEMP_OFFSET + 0] << 8  |
+                      (long) EEPROM[EE_TEMP_OFFSET + 1]);
 
   } 
   else
@@ -549,8 +702,8 @@ long temp;
   EEPROM[EE_STRAIN_OFFSET + 2] = (byte) ((temp >> 8) & 0x000000FF);
   EEPROM[EE_STRAIN_OFFSET + 3] = (byte) (temp & 0x000000FF);
 
-  EEPROM[EE_TEMP_OFFSET + 0] = (byte) ((TempOffset >> 8) & 0x000000FF);
-  EEPROM[EE_TEMP_OFFSET + 1] = (byte) (TempOffset & 0x000000FF);
+  EEPROM[EE_TEMP_OFFSET + 0] = (byte) ((AdxlTempOffset >> 8) & 0x000000FF);
+  EEPROM[EE_TEMP_OFFSET + 1] = (byte) (AdxlTempOffset & 0x000000FF);
 }
 
 
