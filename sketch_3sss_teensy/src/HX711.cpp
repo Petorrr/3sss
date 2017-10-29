@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "HX711.h"
 
+static uint8_t shiftInHX711(uint8_t dataPin, uint8_t clockPin);
 
 HX711::HX711(byte dout, byte pd_sck, byte gain) {
 	begin(dout, pd_sck, gain);
@@ -65,14 +66,16 @@ byte retry = 0;
 	uint8_t filler = 0x00;
 
 	// pulse the clock pin 24 times to read the data
-	data[2] = shiftIn(DOUT, PD_SCK, MSBFIRST);
-	data[1] = shiftIn(DOUT, PD_SCK, MSBFIRST);
-	data[0] = shiftIn(DOUT, PD_SCK, MSBFIRST);
+	data[2] = shiftInHX711(DOUT, PD_SCK);
+	data[1] = shiftInHX711(DOUT, PD_SCK);
+	data[0] = shiftInHX711(DOUT, PD_SCK);
 
 	// set the channel and the gain factor for the next reading using the clock pin
 	for (unsigned int i = 0; i < GAIN; i++) {
 		digitalWrite(PD_SCK, HIGH);
+		delayMicroseconds(1);
 		digitalWrite(PD_SCK, LOW);
+		delayMicroseconds(1);
 	}
 
 	// Replicate the most significant bit to pad out a 32-bit signed integer
@@ -131,9 +134,28 @@ long HX711::get_offset() {
 
 void HX711::power_down() {
 	digitalWrite(PD_SCK, LOW);
+    delayMicroseconds(1);
 	digitalWrite(PD_SCK, HIGH);
+    delayMicroseconds(1);
 }
 
 void HX711::power_up() {
 	digitalWrite(PD_SCK, LOW);
+    delayMicroseconds(1);
+}
+
+static uint8_t shiftInHX711(uint8_t dataPin, uint8_t clockPin)
+{
+uint8_t value = 0;
+uint8_t i;
+
+  for(i = 0; i < 8; ++i)
+  {
+    digitalWrite(clockPin, HIGH);
+    delayMicroseconds(1);
+    value |= (digitalRead(dataPin) << (7 - i));
+    digitalWrite(clockPin, LOW);
+    delayMicroseconds(1);
+  }
+  return value;
 }
