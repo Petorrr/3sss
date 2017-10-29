@@ -6,7 +6,7 @@
 #include "src\adxl362.h"
 
 #include <EEPROM.h>
-#include <IntervalTimer.h>
+//#include <IntervalTimer.h>
 #include <Snooze.h>
 #include <SPI.h>
 
@@ -16,7 +16,7 @@
 // Main Loop timing definitions
 #define MAIN_LOOP_MILLIS    50
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
-#define MSEC_TO_TICKS(x)    (word) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
+#define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
 
 #define MAIN_LOOP_DELAY     0
 #define MAIN_LOOP_WFI       1
@@ -25,15 +25,14 @@
 #define MAIN_LOOP_HIBERNATE 4
 #define MAIN_LOOP_SETPOWER  MAIN_LOOP_WFI
 
-
 // Debug settings definitions
 #define DEBUG               1
 #if DEBUG == 1
 #define DEBUG_MAIN_PROCESS  1
-#define DEBUG_ANT_TX        0
-#define DEBUG_ANT_RX        0
+#define DEBUG_ANT_TX        1
+#define DEBUG_ANT_RX        1
 #endif
-#define ANT_SIMULATION      1
+#define ANT_SIMULATION      0
 
 // Hardware and Product definitions
 #define HARDWARE_REVISION   ((byte) 0x01)
@@ -44,11 +43,10 @@
 
 // Sensor and input definitions
 // Strain Gauge interface
-#define HX711_BUF_SIZE      20
+#define HX711_BUF_SIZE      10
 #define HX711_DATA_PIN      (3)
 #define HX711_CLOCK_PIN     (2)
-#define FORCE_SAMPLES_AVG   5
-#define FORCE_SCALE_FACTOR  ((float) 500 /(float) 100000)
+#define FORCE_SCALE_FACTOR  200
 #define DEFAULT_FORCE_DIST  100     // in mm
 #define XYAXIS_FILTER       25      // new value for 25 %
 
@@ -80,9 +78,9 @@
 // ANT AP2 Interface definitions
 #define AP2_TX_PIN          (10)
 #define AP2_RX_PIN          (9)
-#define AP2_RST_PIN         (8)
-#define AP2_SUSPEND_PIN     (7)
-#define AP2_SLEEP_PIN       (6)
+#define AP2_RST_PIN         (17)
+#define AP2_SUSPEND_PIN     (18)
+#define AP2_SLEEP_PIN       (19)
 #define AP2_RTS_PIN         (16)
 #if 0
 #define AP2_BR1_PIN         (17)
@@ -103,8 +101,8 @@
 
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
-//#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
-#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 100 on Feather?)
+#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
+//#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 100 on Feather?)
 // ANT Transmit Message & Msg ID definitions
 #define MSG_TX_SYNC                   ((byte) 0xA4)
 #define MSG_SYSTEM_RESET_ID           ((byte) 0x4A)
@@ -141,70 +139,71 @@
 // *****************************************************************************
 // GLOBAL Variables Section
 // *****************************************************************************
-static word MainCount = 0;
-static word BatteryVoltage = 0;
-static byte BatteryStatus;
-static long TotalSeconds = 0;
-static IntervalTimer SensorTimer;
-static SnoozeUSBSerial usb;
-static SnoozeTimer TimerS;
+static uint16_t MainCount = 0;
+static uint16_t BatteryVoltage = 0;
+static byte     BatteryStatus;
+static uint32_t TotalSeconds = 0;
+
+static SnoozeUSBSerial  Usb;
+static SnoozeTimer      TimerS;
 // configures the lc's 5v data buffer (OUTPUT, LOW) for low power
-static Snoozelc5vBuffer  LC5vBuffer;
-static SnoozeBlock Config_teensyLC(TimerS, usb, LC5vBuffer);
+static Snoozelc5vBuffer LC5vBuffer;
+static SnoozeBlock      Config_teensyLC(TimerS, Usb, LC5vBuffer);
 
 // Bike Power processing variables
-static word  CrankXTicks = 0;
-static word  CrankXTime = 0;
-static word  CrankYTicks = 0;
-static word  CrankYTime = 0;
-static word  Cadence = 0;
-static word  Force;
-static word  Torque;
-static word  Power;
-static word  ForceDistance = DEFAULT_FORCE_DIST;
+static uint16_t CrankXTicks = 0;
+static uint16_t CrankXTime = 0;
+static uint16_t CrankYTicks = 0;
+static uint16_t CrankYTime = 0;
+static uint16_t Cadence = 0;
+static uint16_t Force;
+static uint16_t Torque;
+static uint16_t Power;
+static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
 
 // Loadcell, Strain Gauge Amplifier variables
 const byte  hx711_data_pin = HX711_DATA_PIN;
 const byte  hx711_clock_pin = HX711_CLOCK_PIN;
-static long Hx711Buf [HX711_BUF_SIZE];
-static byte Hx711Index = 0;
-static long Hx711SensorVal = 0;
+static int32_t Hx711Buf [HX711_BUF_SIZE];
+static byte    Hx711Index = 0;
+static int32_t Hx711SensorVal = 0;
+static int32_t Hx711SensorOffset = 0;
 // Construct the Loadcell Amplifier object
 static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 
 // ADXL362 interface variables
-static ADXL362 Adxl;
-static int16_t XValue;
-static int16_t XValueFilt;
-static int16_t XValuePrev;
-static int16_t YValue;
-static int16_t YValueFilt;
-static int16_t YValuePrev;
-static int16_t ZValue;
-static int16_t AdxlTemperature;
-static long    AdxlRealTemperature;
-static word    AdxlTempOffset = DEFAULT_TEMP_OFFSET;
+static ADXL362  Adxl;
+static int16_t  XValue;
+static int16_t  XValueFilt;
+static int16_t  XValuePrev;
+static int16_t  YValue;
+static int16_t  YValueFilt;
+static int16_t  YValuePrev;
+static int16_t  ZValue;
+static int16_t  AdxlTemperature;
+static int32_t  AdxlRealTemperature;
+static uint16_t AdxlTempOffset = DEFAULT_TEMP_OFFSET;
 
 // ANT communication data
-#define AntSerial Serial1
+#define AntSerial Serial2
 
 // ANT Developer key, if you want to connect to ANT+, you must get the key from thisisant.com
 static const byte NETWORK_KEY[] = {0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45};
 
 // ANT TX messages processor variables
-static byte       AntPedalPower;
-static byte       AntCadence;
-static word       AntAccuPower;
-static word       AntPower;
-static byte       SendCount = 0;
-static byte       UpdateEventCount = 0;
+static byte     AntPedalPower;
+static byte     AntCadence;
+static uint16_t AntAccuPower;
+static uint16_t AntPower;
+static byte     SendCount = 0;
+static byte     UpdateEventCount = 0;
 
 // ANT RX messages processor variables
-static boolean    MsgSync = false;
-static byte       MsgIndex = 0;
-static byte       MsgLength = 0;
-static byte       MsgBuf [ANT_RXBUF_SIZE];
-static boolean    AntCalibration = false;
+static boolean  MsgSync = false;
+static byte     MsgIndex = 0;
+static byte     MsgLength = 0;
+static byte     MsgBuf [ANT_RXBUF_SIZE];
+static boolean  AntCalibration = false;
 
 // *****************************************************************************
 // Local Function prototypes
@@ -248,13 +247,15 @@ static void ANTopenChannel (byte chNr);
 // *****************************************************************************
 void setup()
 {
-byte temp;
+uint8_t temp;
 
   // Put setup code here, to run once:
   pinMode(LED_BUILTIN, OUTPUT);
 
+#if DEBUG_MAIN_PROCESS == 1
   Serial.begin(115200);
   Serial.println("Hello 3sss");
+#endif
 
   // Read the Configuration for the EPROM storage
   eepromGetConfig();
@@ -282,7 +283,6 @@ byte temp;
   // *** Only for testing
   pinMode (20, INPUT);                  // INT2 AWAKE status
 
-
   // Initialize the AP2 interface pins
 #ifdef AP2_BR1_PIN
   pinMode(AP2_BR1_PIN, OUTPUT);
@@ -306,6 +306,9 @@ byte temp;
   digitalWrite(AP2_SLEEP_PIN, 0);
   digitalWrite(AP2_SUSPEND_PIN, 1);
 
+#if DEBUG_MAIN_PROCESS == 1
+  Serial.println("Starting ANT");
+#endif
   // Initalize Serial1 or SoftwareSerial
   AntSerial.begin(38400);
   // Stabilize for a while
@@ -320,15 +323,8 @@ byte temp;
   // 39=bandgap ref (PMC_REGSC |= PMC_REGSC_BGBE), used for Batt Voltage
   PMC_REGSC |= PMC_REGSC_BGBE; 
 
-  //********************************************************
-  //   Set Low Power Timer wake up in milliseconds.
-  //********************************************************
-#if MAIN_LOOP_SETPOWER >= MAIN_LOOP_SLEEP
-  TimerS.setTimer(MAIN_LOOP_MILLIS);
-#endif
-#if 0
-  // Create readSensors task using Scheduler to run in 'parallel' with main loop()
-  SensorTimer.begin(readSensorsTask, (SENSOR_TICK_MILLIS * 1000));
+#if DEBUG_MAIN_PROCESS == 1
+  Serial.println("Setup ready");
 #endif
 }
 
@@ -337,11 +333,11 @@ byte temp;
 // *****************************************************************************
 void loop()
 {
-byte  i;
-long  forceBufAvg;
-long  forceBufMax;
+uint8_t  i;
+int32_t  forceBufAvg;
+int32_t  forceBufMax;
 uint32_t startMillis;
-word  forceCnts;
+uint32_t forceCnts;
 
   // Setup and maintain loop timing and counter, blinky
   startMillis = millis();
@@ -349,7 +345,7 @@ word  forceCnts;
   // Maintain Total Seconds counter and blinky 
   if ((MainCount % MSEC_TO_TICKS(1000)) == 0)
   {
-    digitalWrite(LED_BUILTIN, HIGH);
+    //digitalWrite(LED_BUILTIN, HIGH);
     TotalSeconds++;
   }
 
@@ -365,17 +361,26 @@ word  forceCnts;
     if (Hx711Buf [i] > forceBufMax)
       forceBufMax = Hx711Buf [i];
   }
-  forceBufAvg = forceBufAvg / HX711_BUF_SIZE;
+  forceBufAvg = forceBufAvg / (int32_t) HX711_BUF_SIZE;
+
+  // *** Remove later, just for test
+  if (TotalSeconds == 3)
+    Hx711SensorOffset = forceBufAvg;
+  // *** Remove later, just for test
+    
   // Calculate Force, Torque and eventually Power
-  forceCnts = (word) abs(forceBufAvg - hx711.get_offset());
-  Force = (word) ((float) forceCnts * hx711.get_scale());
-  Torque = (Force * ForceDistance) / 1000;
-  Power = ((uint32_t) 105 * (uint32_t) Cadence * (uint32_t) Torque) / (uint32_t) 10000;
+  if (forceBufAvg >= Hx711SensorOffset) 
+    forceCnts = (uint32_t) (forceBufAvg - Hx711SensorOffset);
+  else
+    forceCnts = (uint32_t) (Hx711SensorOffset - forceBufAvg);
+  Force = (uint16_t) (forceCnts / (uint32_t) FORCE_SCALE_FACTOR);
+  Torque = (uint16_t) (((uint32_t) Force * (uint32_t) ForceDistance) / (uint32_t) 1000);
+  Power = (uint16_t) (((uint32_t) 105 * (uint32_t) Cadence * (uint32_t) Torque) / (uint32_t) 10000);
   
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
   //Serial.printf("%4d %4d %3u\n", XValueFilt, YValueFilt, Cadence);
-  Serial.printf("%4u %4u %4u %4u\n", Force, Torque, Power, Cadence);
+  //Serial.printf("%4u %3u %3u %4u\n", Force, Torque, Cadence, Power);
   //Serial.println (digitalRead(20));
 #endif
 
@@ -386,12 +391,11 @@ word  forceCnts;
     if (AntCalibration)
     {
 #if ANT_SIMULATION == 1
-      broadcastCalibration(true, Hx711SensorVal + random (0, 100));
+      broadcastCalibration(true, (word) (Hx711SensorVal + random (0, 100)));
 #else
       // Tare offset the strain gauge values with averaged value
-      hx711.set_offset(forceBufAvg);
-      hx711.set_scale((float) FORCE_SCALE_FACTOR);
-      broadcastCalibration(true, (word) (hx711.get_offset() >> 4));
+      Hx711SensorOffset = forceBufAvg;
+      broadcastCalibration(true, (word) (Hx711SensorOffset >> 4));
       
       // Finally save the configuration to the EEPROM
       eepromSetConfig();
@@ -406,7 +410,7 @@ word  forceCnts;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
-      AntPower = (word) (((float) forceBufAvg - (float) hx711.get_offset()) * (float) hx711.get_scale());
+      AntPower = Power;
 #endif
       AntAccuPower += AntPower;
       broadcastBikePower();
@@ -424,9 +428,6 @@ word  forceCnts;
       if ((TotalSeconds % 15) == 0)
       {
         determineBatteryStatus();
-        Serial.print(BatteryVoltage);
-        Serial.print(' ');
-        Serial.println(BatteryStatus);
         broadcastBatteryInfo();
       }
       // Every other 4 interleaves Manufacturer and Product Info
@@ -453,10 +454,10 @@ word  forceCnts;
 // *****************************************************************************
 static void handleDelayScenario(uint32_t startMillis)
 {
-word execMillis;
+uint16_t execMillis;
   
   // Determine execution time, and delay for the remainder
-  execMillis = (word) (millis() - startMillis);
+  execMillis = (uint16_t) (millis() - startMillis);
 
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_DELAY
   if (execMillis < MAIN_LOOP_MILLIS)
@@ -497,15 +498,25 @@ word execMillis;
 // *****************************************************************************
 static void readSensorsTask()
 {
-  // Read the value from the HX711 sensor into the sample buffer
-  if (hx711.is_ready())
+  // Every 100 msec bring HX711 out of Power Down mode
+  if ((MainCount % MSEC_TO_TICKS(100)) == 0)
+    hx711.begin(hx711_data_pin, hx711_clock_pin, 128);
+  else if ((MainCount % MSEC_TO_TICKS(100)) == 1)
   {
-    Hx711SensorVal = hx711.read();
-    Hx711Buf [Hx711Index] = Hx711SensorVal & 0x007FFFFF;
-    Hx711Index++;
-    if (Hx711Index >= HX711_BUF_SIZE)
-      Hx711Index = 0;
+    // Read the value from the HX711 sensor into the sample buffer
+    if (hx711.is_ready())
+    {
+      Hx711SensorVal = hx711.read();
+      Hx711Buf [Hx711Index] = Hx711SensorVal;
+      Hx711Index++;
+      if (Hx711Index >= HX711_BUF_SIZE)
+        Hx711Index = 0;
+    }
+    // Power down for 100 msec to save current
+    hx711.power_down();
   }
+
+#if 0
 // Simulation
   else
   {
@@ -513,13 +524,10 @@ static void readSensorsTask()
     Hx711Buf [Hx711Index] = Hx711SensorVal & 0x007FFFFF;
     Hx711Index++;
     if (Hx711Index >= HX711_BUF_SIZE)
-    {
       Hx711Index = 0;
-      // Tare offset the strain gauge values with averaged value
-      hx711.set_offset(Hx711SensorVal);
-    }
   }
 // End Simulation
+#endif
 
   // Read all three acceleration axes in burst to ensure all measurements correspond to same sample time
   Adxl.readXYZTData(XValue, YValue, ZValue, AdxlTemperature);  
@@ -558,7 +566,7 @@ static void readSensorsTask()
   // Calculate Cadence only when above a certain time to prevent too high values
   // Max Cadence is 60000/(400/2) = 300
   if ((CrankXTime + CrankYTime) > 400)
-    Cadence = (word) 60000 / ((CrankXTime + CrankYTime) / 2);
+    Cadence = (uint16_t) 60000 / ((CrankXTime + CrankYTime) / 2);
   else
     Cadence = 0;
   
@@ -570,13 +578,13 @@ static void readSensorsTask()
   // Maintain Crank timing
   CrankTicks++;
   // Calculate X degrees travel to the previous samples (~1000 cnts = 90.0 deg)
-  tempAbs = (word) abs (XValue - XValuePrev);
+  tempAbs = (uint16_t) abs (XValue - XValuePrev);
   if (tempAbs < 1000)
-    XDeg = XDeg + (word) (((long) tempAbs * (long) 90) / (long) 100);
+    XDeg = XDeg + (uint16_t) (((long) tempAbs * (long) 90) / (long) 100);
   // Calculate Y degrees travel since previous sample (~1000 cnts = 90.0 deg)
-  tempAbs = (word) abs (YValue - YValuePrev);
+  tempAbs = (uint16_t) abs (YValue - YValuePrev);
   if (tempAbs < 1000)
-    YDeg = YDeg + (word) (((long)tempAbs * (long) 90) / (long) 100);
+    YDeg = YDeg + (uint16_t) (((long)tempAbs * (long) 90) / (long) 100);
 
   // Averaged of X and Y axis should accumulate to above 360 degrees
   CrankTime = CrankTicks * MAIN_LOOP_MILLIS;
@@ -585,7 +593,7 @@ static void readSensorsTask()
   {
     CrankTicks = 0;
     // Calculate Raw Cadence based on > 360 degrees in X and Y averaged
-    Cadence = (word) (((uint32_t) 60000 * (uint32_t) deg) / ((uint32_t) 3600 * (uint32_t) CrankTime));
+    Cadence = (uint16_t) (((uint32_t) 60000 * (uint32_t) deg) / ((uint32_t) 3600 * (uint32_t) CrankTime));
     XDeg = 0;
     YDeg = 0;
   }
@@ -618,7 +626,7 @@ static void readSensorsTask()
     CrankTime = CrankTicks * SENSOR_TICK_MILLIS;
     CrankTicks = 0;
     // Calculate Cadence
-    Cadence = (word) 60000 / CrankTime;   
+    Cadence = (uint16_t) 60000 / CrankTime;   
   }
   // Store last CrankState for next time
   PrevCrankState = CrankState;
@@ -643,7 +651,7 @@ uint32_t x;
 static void determineBatteryStatus()
 {
   // Battery monitoring
-  BatteryVoltage = (word) getInputVoltage() / 10;
+  BatteryVoltage = (uint16_t) getInputVoltage() / 10;
   if (BatteryVoltage < 220)
     BatteryStatus = BATTERY_CRITICAL;
   else if (BatteryVoltage < 240)
@@ -672,7 +680,8 @@ long templ;
              (long) EEPROM[EE_STRAIN_OFFSET + 1] << 16 |
              (long) EEPROM[EE_STRAIN_OFFSET + 2] << 8  |
              (long) EEPROM[EE_STRAIN_OFFSET + 3]);
-    hx711.set_offset(templ);
+    Hx711SensorOffset = templ;
+    
     AdxlTempOffset = ((long) EEPROM[EE_TEMP_OFFSET + 0] << 8  |
                       (long) EEPROM[EE_TEMP_OFFSET + 1]);
 
@@ -693,14 +702,11 @@ long templ;
 // *****************************************************************************
 static void eepromSetConfig()
 {
-long temp;
-
   // Write configuration variables to the EEPROM
-  temp = hx711.get_offset();
-  EEPROM[EE_STRAIN_OFFSET + 0] = (byte) ((temp >> 24) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 1] = (byte) ((temp >> 16) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 2] = (byte) ((temp >> 8) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 3] = (byte) (temp & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 0] = (byte) ((Hx711SensorOffset >> 24) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 1] = (byte) ((Hx711SensorOffset >> 16) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 2] = (byte) ((Hx711SensorOffset >> 8) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 3] = (byte) (Hx711SensorOffset & 0x000000FF);
 
   EEPROM[EE_TEMP_OFFSET + 0] = (byte) ((AdxlTempOffset >> 8) & 0x000000FF);
   EEPROM[EE_TEMP_OFFSET + 1] = (byte) (AdxlTempOffset & 0x000000FF);
@@ -712,7 +718,7 @@ long temp;
 // *****************************************************************************
 static void antSetup()
 {
-  // Flush any spurious received characters
+  // Flush any spurious characters
   AntSerial.flush();
 
   // Send reset to ANT Network
@@ -888,7 +894,7 @@ long ticks;
 // *****************************************************************************
 static void AP2reset (void)
 {
-  // Issue and AP2 hard reset
+  // Issue an AP2 hard reset
   digitalWrite(AP2_RST_PIN, 0);
   delayMicroseconds(100);
   digitalWrite(AP2_RST_PIN, 1);
@@ -1007,7 +1013,7 @@ static void ANTrxProcess (void)
       if (MsgBuf[5] == MSG_TX_EVENT)
       {
         // Toggle the communication LED on active transmissions
-        digitalWrite(LED_BUILTIN, !digitalRead (LED_BUILTIN));
+        digitalWrite(LED_BUILTIN, HIGH);
 #if DEBUG_ANT_RX == 1
         Serial.println("TX success");
 #endif
