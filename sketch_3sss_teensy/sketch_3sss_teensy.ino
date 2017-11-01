@@ -23,21 +23,22 @@
 #define MAIN_LOOP_SLEEP     2
 #define MAIN_LOOP_DEEPSLEEP 3
 #define MAIN_LOOP_HIBERNATE 4
+#define MAIN_LOOP_VLPR      5
 #define MAIN_LOOP_SETPOWER  MAIN_LOOP_WFI
 
 // Debug settings definitions
 #define DEBUG               1
 #if DEBUG == 1
 #define DEBUG_MAIN_PROCESS  1
-#define DEBUG_ANT_TX        1
-#define DEBUG_ANT_RX        1
+#define DEBUG_ANT_TX        0
+#define DEBUG_ANT_RX        0
 #endif
 #define ANT_SIMULATION      0
 
 // Hardware and Product definitions
-#define HARDWARE_REVISION   ((byte) 0x01)
-#define MANUFACTURER_ID     ((word) 0x00FF)
-#define MODEL_NUMBER        ((word) 3555)
+#define HARDWARE_REVISION   ((uint8_t) 0x01)
+#define MANUFACTURER_ID     ((uint16_t) 0x00FF)
+#define MODEL_NUMBER        ((uint16_t) 3555)
 #define SW_MAIN_REVISION    1
 #define SW_SUB_REVISION     2
 
@@ -99,34 +100,38 @@
 #define BIKE_POWER_TT       0x05
 #define BIKE_POWER_CP       8182
 
+#define ANT_TX_POWER_HIGH   3
+#define ANT_TX_POWER_MEDIUM 2
+#define ANT_TX_POWER_LOW    1
+#define ANT_TX_POWER_LOWEST 0
+
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
-#define ANT_RX_MAX_TIMEOUT            50 // In milliseconds (was 100 on Feather?)
-//#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 100 on Feather?)
+#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 50 initially)
 // ANT Transmit Message & Msg ID definitions
-#define MSG_TX_SYNC                   ((byte) 0xA4)
-#define MSG_SYSTEM_RESET_ID           ((byte) 0x4A)
-#define MSG_NETWORK_KEY_ID            ((byte) 0x46)
-#define MSG_ASSIGN_CHANNEL_ID         ((byte) 0x42)
-#define MSG_CHANNEL_ID_ID             ((byte) 0x51)
-#define MSG_CHANNEL_RADIO_FREQ_ID     ((byte) 0x45)
-#define MSG_CHANNEL_MESG_PERIOD_ID    ((byte) 0x43)
-#define MSG_RADIO_TX_POWER_ID         ((byte) 0x47)
-#define MSG_CHANNEL_SEARCH_TIMEOUT_ID ((byte) 0x44)
-#define MSG_OPEN_CHANNEL_ID           ((byte) 0x4B)
-#define MSG_BROADCAST_DATA_ID         ((byte) 0x4E)
-#define MSG_ACKNOWLEDGE_DATA_ID       ((byte) 0x4F)
+#define MSG_TX_SYNC                   ((uint8_t) 0xA4)
+#define MSG_SYSTEM_RESET_ID           ((uint8_t) 0x4A)
+#define MSG_NETWORK_KEY_ID            ((uint8_t) 0x46)
+#define MSG_ASSIGN_CHANNEL_ID         ((uint8_t) 0x42)
+#define MSG_CHANNEL_ID_ID             ((uint8_t) 0x51)
+#define MSG_CHANNEL_RADIO_FREQ_ID     ((uint8_t) 0x45)
+#define MSG_CHANNEL_MESG_PERIOD_ID    ((uint8_t) 0x43)
+#define MSG_RADIO_TX_POWER_ID         ((uint8_t) 0x47)
+#define MSG_CHANNEL_SEARCH_TIMEOUT_ID ((uint8_t) 0x44)
+#define MSG_OPEN_CHANNEL_ID           ((uint8_t) 0x4B)
+#define MSG_BROADCAST_DATA_ID         ((uint8_t) 0x4E)
+#define MSG_ACKNOWLEDGE_DATA_ID       ((uint8_t) 0x4F)
 
-#define MSG_CHANNEL_RESPONSE          ((byte) 0x40)
-#define MSG_TX_EVENT                  ((byte) 0x03)
-#define MSG_CALIBRATION_REQUEST       ((byte) 0xAA)
+#define MSG_CHANNEL_RESPONSE          ((uint8_t) 0x40)
+#define MSG_TX_EVENT                  ((uint8_t) 0x03)
+#define MSG_CALIBRATION_REQUEST       ((uint8_t) 0xAA)
 
 // Define Data Pages
-#define DP_CALIBRATION_REQ            ((byte) 0x01)
-#define DP_STANDARD_POWER_ONLY        ((byte) 0x10)
-#define DP_MANUFACTURER_INFO          ((byte) 0x50)
-#define DP_PRODUCT_INFO               ((byte) 0x51)
-#define DP_BATTERY_INFO               ((byte) 0x52)
+#define DP_CALIBRATION_REQ            ((uint8_t) 0x01)
+#define DP_STANDARD_POWER_ONLY        ((uint8_t) 0x10)
+#define DP_MANUFACTURER_INFO          ((uint8_t) 0x50)
+#define DP_PRODUCT_INFO               ((uint8_t) 0x51)
+#define DP_BATTERY_INFO               ((uint8_t) 0x52)
 
 // ANT Channel Type Codes
 #define CHANNEL_TYPE_BIDIRECTIONAL_RECEIVE    0x00
@@ -141,7 +146,7 @@
 // *****************************************************************************
 static uint16_t MainCount = 0;
 static uint16_t BatteryVoltage = 0;
-static byte     BatteryStatus;
+static uint8_t  BatteryStatus;
 static uint32_t TotalSeconds = 0;
 
 static SnoozeUSBSerial  Usb;
@@ -162,10 +167,10 @@ static uint16_t Power;
 static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
 
 // Loadcell, Strain Gauge Amplifier variables
-const byte  hx711_data_pin = HX711_DATA_PIN;
-const byte  hx711_clock_pin = HX711_CLOCK_PIN;
+const uint8_t  hx711_data_pin = HX711_DATA_PIN;
+const uint8_t  hx711_clock_pin = HX711_CLOCK_PIN;
 static int32_t Hx711Buf [HX711_BUF_SIZE];
-static byte    Hx711Index = 0;
+static uint8_t Hx711Index = 0;
 static int32_t Hx711SensorVal = 0;
 static int32_t Hx711SensorOffset = 0;
 // Construct the Loadcell Amplifier object
@@ -188,22 +193,24 @@ static uint16_t AdxlTempOffset = DEFAULT_TEMP_OFFSET;
 #define AntSerial Serial2
 
 // ANT Developer key, if you want to connect to ANT+, you must get the key from thisisant.com
-static const byte NETWORK_KEY[] = {0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45};
+static const uint8_t NETWORK_KEY[] = {0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45};
 
 // ANT TX messages processor variables
-static byte     AntPedalPower;
-static byte     AntCadence;
+static uint8_t  AntPedalPower;
+static uint8_t  AntCadence;
 static uint16_t AntAccuPower;
 static uint16_t AntPower;
-static byte     SendCount = 0;
-static byte     UpdateEventCount = 0;
+static uint8_t  SendCount = 0;
+static uint8_t  UpdateEventCount = 0;
 
 // ANT RX messages processor variables
 static boolean  MsgSync = false;
-static byte     MsgIndex = 0;
-static byte     MsgLength = 0;
-static byte     MsgBuf [ANT_RXBUF_SIZE];
+static uint8_t  MsgIndex = 0;
+static uint8_t  MsgLength = 0;
+static uint8_t  MsgBuf [ANT_RXBUF_SIZE];
 static boolean  AntCalibration = false;
+static boolean  AntTxSuccess = false;
+static boolean  AntTxSetupOK = false;
 
 // *****************************************************************************
 // Local Function prototypes
@@ -240,6 +247,7 @@ static void ANTassignChannel (byte chNr, byte chType);
 static void ANTsetChannelId (byte chNr, word deviceNr, byte deviceId, byte deviceTt);
 static void ANTsetFrequency (byte chNr, byte freq);
 static void ANTsetPeriod (byte chNr, word period);
+static void ANTsetTxPower (uint8_t power);
 static void ANTopenChannel (byte chNr);
 
 // *****************************************************************************
@@ -309,7 +317,7 @@ uint8_t temp;
 #if DEBUG_MAIN_PROCESS == 1
   Serial.println("Starting ANT");
 #endif
-  // Initalize Serial1 or SoftwareSerial
+  // Initalize ANT HW Serial or SoftwareSerial
   AntSerial.begin(38400);
   // Stabilize for a while
   delay(10);
@@ -345,7 +353,12 @@ uint32_t forceCnts;
   // Maintain Total Seconds counter and blinky 
   if ((MainCount % MSEC_TO_TICKS(1000)) == 0)
   {
-    //digitalWrite(LED_BUILTIN, HIGH);
+    if (AntTxSuccess)
+    {
+      // Ant Tx is active; blink Led only every second shortly
+      digitalWrite(LED_BUILTIN, HIGH);
+      AntTxSuccess = false;
+    }
     TotalSeconds++;
   }
 
@@ -363,11 +376,6 @@ uint32_t forceCnts;
   }
   forceBufAvg = forceBufAvg / (int32_t) HX711_BUF_SIZE;
 
-  // *** Remove later, just for test
-  if (TotalSeconds == 3)
-    Hx711SensorOffset = forceBufAvg;
-  // *** Remove later, just for test
-    
   // Calculate Force, Torque and eventually Power
   if (forceBufAvg >= Hx711SensorOffset) 
     forceCnts = (uint32_t) (forceBufAvg - Hx711SensorOffset);
@@ -376,14 +384,16 @@ uint32_t forceCnts;
   Force = (uint16_t) (forceCnts / (uint32_t) FORCE_SCALE_FACTOR);
   Torque = (uint16_t) (((uint32_t) Force * (uint32_t) ForceDistance) / (uint32_t) 1000);
   Power = (uint16_t) (((uint32_t) 105 * (uint32_t) Cadence * (uint32_t) Torque) / (uint32_t) 10000);
-  
+
+  // Turn off LED indicator
+  digitalWrite(LED_BUILTIN, LOW);
+
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  //Serial.printf("%4d %4d %3u\n", XValueFilt, YValueFilt, Cadence);
-  //Serial.printf("%4u %3u %3u %4u\n", Force, Torque, Cadence, Power);
-  //Serial.println (digitalRead(20));
+  Serial.println(forceBufAvg);
+  //Serial.printf("%4u %3u %3u %4u b:%d\n", Force, Torque, Cadence, Power, BatteryVoltage);
 #endif
-
+ 
   // Broadcast ANT data messages @ 4 Hz update intervals
   if ((MainCount % MSEC_TO_TICKS(250)) == 1)
   {
@@ -405,8 +415,11 @@ uint32_t forceCnts;
     // Interleave Power broadcast every 4 messages
     else if ((SendCount % 5) != 4)
     {
-      AntPedalPower = 50;
-      AntCadence = (byte) Cadence;
+      AntPedalPower = 0xFF;
+      if (Cadence < 255)
+        AntCadence = (byte) Cadence;
+      else
+        AntCadence = 254;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
@@ -425,7 +438,7 @@ uint32_t forceCnts;
     else
     {
       // Battery Info every 15 seconds
-      if ((TotalSeconds % 15) == 0)
+      if ((SendCount % 60) == 4)
       {
         determineBatteryStatus();
         broadcastBatteryInfo();
@@ -442,11 +455,13 @@ uint32_t forceCnts;
 
   // Run ANT RX parser check with no timeout for incoming requests
   ANTreceive(0);
-  // Led off, to keep current usage low
-  digitalWrite(LED_BUILTIN, LOW);
 
+  // Put ANT into sleep mode
+  digitalWrite(AP2_SLEEP_PIN, 1);
   // At last handle the 'sleep' until next main cycle needed
   handleDelayScenario(startMillis);
+  // Resume the ANT communication from sleep
+  digitalWrite(AP2_SLEEP_PIN, 0);
 }
 
 // *****************************************************************************
@@ -467,8 +482,9 @@ uint16_t execMillis;
   if (execMillis < MAIN_LOOP_MILLIS)
   {
     while ((millis() - startMillis) < MAIN_LOOP_MILLIS)
-      __asm__("wfi");
-  }
+      // __asm__("wfi");
+      Snooze.idle(Config_teensyLC);
+ }
 #endif
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_SLEEP
   if (execMillis < MAIN_LOOP_MILLIS)
@@ -481,14 +497,30 @@ uint16_t execMillis;
   if (execMillis < MAIN_LOOP_MILLIS)
   {
     TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
-    Snooze.deepSleep(Config_teensyLC);
+    Snooze.deepSleep(Config_teensyLC, LLS);
   }
 #endif
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_HIBERNATE
   if (execMillis < MAIN_LOOP_MILLIS)
   {
     TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
-    Snooze.hibernate(Config_teensyLC);
+    Snooze.hibernate(Config_teensyLC, LLS);
+  }
+#endif
+#if MAIN_LOOP_SETPOWER == MAIN_LOOP_VLPR
+  if (execMillis < MAIN_LOOP_MILLIS)
+  {
+    TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
+    // Switch to low power clock rate
+    pee_blpe();
+    // Enter into VLPR mode; still running
+    enter_vlpr();
+    // VLPS mode
+    vlps();
+    // Leave VLPR mode
+    exit_vlpr();
+    // Back to normal clock rate
+    blpe_pee();
   }
 #endif
 }
@@ -642,7 +674,7 @@ uint32_t getInputVoltage()
 uint32_t x;
 
     x = analogRead(ANA_BATT_VOLT_CH);
-    return ((266*x*x + 2496026531 - 1431005 * x) / 342991) - 50;
+    return ((266*x*x + 2496026531 - 1431005 * x) / 342991) + 42;
 }
 
 // *****************************************************************************
@@ -723,8 +755,8 @@ static void antSetup()
 
   // Send reset to ANT Network
   ANTreset();
-  // Delay after resetting the radio (spec: 500 msec)
-  delay (750);
+  // Delay after resetting the radio (spec: max 2 msec)
+  delay (10);
   ANTreceive(ANT_RX_MAX_TIMEOUT);
 
   // Set the Network Key (currently to DEVELOPER)
@@ -745,6 +777,10 @@ static void antSetup()
 
   // Set ANT period
   ANTsetPeriod(ANT_CHANNEL_NR, BIKE_POWER_CP);
+  ANTreceive(ANT_RX_MAX_TIMEOUT);
+
+  // Set ANT Tx Power to medium power for optimum power management
+  ANTsetTxPower(ANT_TX_POWER_MEDIUM);
   ANTreceive(ANT_RX_MAX_TIMEOUT);
 
   // Open the ANT channel for communication broadcasting
@@ -864,8 +900,8 @@ uint8_t buf[13];
 // *****************************************************************************
 static void broadcastBatteryInfo (void)
 {
-uint8_t buf[13];
-long ticks;
+uint8_t  buf[13];
+uint32_t ticks;
 
   // Fill ANT Battery info data buffer with data
   buf[0] = MSG_TX_SYNC;
@@ -876,13 +912,13 @@ long ticks;
   buf[5] = 0xFF;
   buf[6] = 0xFF;                  // Battery identifier not used
   ticks = TotalSeconds / 2;       // Runtime in 2 seconds units
-  buf[7] = (byte) (ticks & 0x000000FF);
+  buf[7] = (uint8_t) (ticks & 0x000000FF);
   ticks = ticks >> 8;
-  buf[8] = (byte) (ticks & 0x000000FF);
+  buf[8] = (uint8_t) (ticks & 0x000000FF);
   ticks = ticks >> 8;
-  buf[9] = (byte) (ticks & 0x000000FF);
-  buf[10] = BatteryVoltage % 100;
-  buf[11] = 0x80 | (BatteryStatus << 4) | (BatteryVoltage / 100);
+  buf[9] = (uint8_t) (ticks & 0x000000FF);
+  buf[10] = (uint8_t) (256 * (BatteryVoltage % 100) / 100);
+  buf[11] = 0x80 | (BatteryStatus << 4) | (uint8_t) (BatteryVoltage / 100);
   buf[12] = checkSum(buf, 12);
   ANTsend (buf, 13);
 
@@ -923,12 +959,12 @@ static boolean ANTreceive (word timeout)
 {
 int sbuflength = 0;
 uint8_t msg = 0;
-uint32_t retry = 0;
+uint16_t retry = 0;
 
   // Wait for start of message reception, timeout in milliseconds
   if (timeout == 0)
     timeout = 1;
-  retry = (uint32_t) (timeout * 10);
+  retry = (uint16_t) (timeout * 10);
   while (sbuflength == 0 && retry > 0)
   {
     sbuflength = AntSerial.available();
@@ -984,12 +1020,26 @@ uint32_t retry = 0;
     }
 
     // Wait for next character to parse (can be too fast), max 2 ms (slowest ~4800 baud)
-    if (AntSerial.available() == 0)
-      delayMicroseconds(2000);
+    //if (AntSerial.available() == 0)
+      //delayMicroseconds(2000);
+    retry = (uint16_t) (20);
+    while (AntSerial.available() == 0 && retry > 0)
+    {
+      delayMicroseconds (100);
+      retry--;
+    }
 
     sbuflength = AntSerial.available();
   }
 
+  // Status indication ANT setup procedure
+  if (AntTxSetupOK)
+  {
+    AntTxSetupOK = false;
+    digitalWrite(LED_BUILTIN, HIGH);
+    delayMicroseconds (30);
+    digitalWrite(LED_BUILTIN, LOW);
+  }
 
   // Reset other used variables for next message
   MsgSync = false;
@@ -1012,8 +1062,7 @@ static void ANTrxProcess (void)
     {
       if (MsgBuf[5] == MSG_TX_EVENT)
       {
-        // Toggle the communication LED on active transmissions
-        digitalWrite(LED_BUILTIN, HIGH);
+        AntTxSuccess = true;
 #if DEBUG_ANT_RX == 1
         Serial.println("TX success");
 #endif
@@ -1069,6 +1118,8 @@ static void ANTrxProcess (void)
         Serial.println(MsgBuf[5], HEX);
       }
 #endif
+      if (MsgBuf[5] == 0)
+        AntTxSetupOK = true;
     }
   }
   else if (MsgBuf[2] == MSG_ACKNOWLEDGE_DATA_ID)
@@ -1224,6 +1275,22 @@ uint8_t buf[7];
   buf[5] = highByte (period);
   buf[6] = checkSum(buf, 6);
   ANTsend(buf, 7);
+}
+
+// *****************************************************************************
+// ANT setup routine(s); ANTsetTxPower
+// *****************************************************************************
+static void ANTsetTxPower (uint8_t power)
+{
+uint8_t buf[6];
+
+  buf[0] = MSG_TX_SYNC;
+  buf[1] = 0x02;
+  buf[2] = MSG_RADIO_TX_POWER_ID;
+  buf[3] = 0;
+  buf[4] = power;
+  buf[5] = checkSum(buf, 5);
+  ANTsend(buf, 6);
 }
 
 // *****************************************************************************
