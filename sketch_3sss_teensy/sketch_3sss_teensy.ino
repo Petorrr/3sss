@@ -36,7 +36,7 @@
 #define ANT_SIMULATION      0
 
 // Hardware and Product definitions
-#define HARDWARE_REVISION   ((uint8_t) 0x01)
+#define HARDWARE_REVISION   ((uint8_t)  0x01)
 #define MANUFACTURER_ID     ((uint16_t) 0x00FF)
 #define MODEL_NUMBER        ((uint16_t) 3555)
 #define SW_MAIN_REVISION    1
@@ -45,11 +45,12 @@
 // Sensor and input definitions
 // Strain Gauge interface
 #define HX711_BUF_SIZE      10
+#define HX711_FILTER        25      // new value for 25 %
 #define HX711_DATA_PIN      (3)
 #define HX711_CLOCK_PIN     (2)
-#define FORCE_SCALE_FACTOR  200
+#define FORCE_SCALE_FACTOR  20
 #define DEFAULT_FORCE_DIST  100     // in mm
-#define XYAXIS_FILTER       25      // new value for 25 %
+#define XYAXIS_FILTER       25      // new value for 50 %
 
 // ADXL362 interface
 #define DEFAULT_TEMP_OFFSET -77     // in counts
@@ -107,7 +108,9 @@
 
 // ANT Protocol Message definitions
 #define ANT_RXBUF_SIZE                40
-#define ANT_RX_MAX_TIMEOUT            10 // In milliseconds (was 50 initially)
+#define ANT_RX_SETUP_TIMEOUT          10 // In milliseconds (was 50 initially)
+#define ANT_RX_WAIT_TIME              0
+
 // ANT Transmit Message & Msg ID definitions
 #define MSG_TX_SYNC                   ((uint8_t) 0xA4)
 #define MSG_SYSTEM_RESET_ID           ((uint8_t) 0x4A)
@@ -149,11 +152,12 @@ static uint16_t BatteryVoltage = 0;
 static uint8_t  BatteryStatus;
 static uint32_t TotalSeconds = 0;
 
-static SnoozeUSBSerial  Usb;
-static SnoozeTimer      TimerS;
+SnoozeUSBSerial  Usb;
+SnoozeTimer      TimerS;
 // configures the lc's 5v data buffer (OUTPUT, LOW) for low power
-static Snoozelc5vBuffer LC5vBuffer;
-static SnoozeBlock      Config_teensyLC(TimerS, Usb, LC5vBuffer);
+Snoozelc5vBuffer LC5vBuffer;
+SnoozeBlock      Config_teensyLC(TimerS, Usb, LC5vBuffer);
+SnoozeBlock      DummyConfig;
 
 // Bike Power processing variables
 static uint16_t CrankXTicks = 0;
@@ -172,6 +176,7 @@ const uint8_t  hx711_clock_pin = HX711_CLOCK_PIN;
 static int32_t Hx711Buf [HX711_BUF_SIZE];
 static uint8_t Hx711Index = 0;
 static int32_t Hx711SensorVal = 0;
+static int32_t Hx711SensorFilt = 0;
 static int32_t Hx711SensorOffset = 0;
 // Construct the Loadcell Amplifier object
 static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
@@ -225,7 +230,7 @@ static void eepromGetConfig();
 static void eepromSetConfig();
 
 static void broadcastBikePower (void);
-static void broadcastCalibration (boolean success, word calibrationVal);
+static void broadcastCalibration (boolean success, uint16_t calibrationVal);
 static void broadcastMfg (void);
 static void broadcastProduct (void);
 static void broadcastBatteryInfo (void);
@@ -235,20 +240,20 @@ static void antSetup();
 static void AP2reset (void);
 static bool AP2waitCts (void);
 
-static boolean ANTreceive (word timeout);
+static boolean ANTreceive (uint16_t timeout);
 static void    ANTrxProcess (void);
 
-static void ANTsend (uint8_t buf[], int length);
-static byte checkSum (byte *dataPtr, int length);
+static void ANTsend (uint8_t buf[], int16_t length);
+static uint8_t checkSum (uint8_t *dataPtr, int16_t length);
 
 static void ANTreset (void);
 static void ANTsetNetwork (void);
-static void ANTassignChannel (byte chNr, byte chType);
-static void ANTsetChannelId (byte chNr, word deviceNr, byte deviceId, byte deviceTt);
-static void ANTsetFrequency (byte chNr, byte freq);
-static void ANTsetPeriod (byte chNr, word period);
+static void ANTassignChannel (uint8_t chNr, uint8_t chType);
+static void ANTsetChannelId (uint8_t chNr, uint16_t deviceNr, uint8_t deviceId, uint8_t deviceTt);
+static void ANTsetFrequency (uint8_t chNr, uint8_t freq);
+static void ANTsetPeriod (uint8_t chNr, uint16_t period);
 static void ANTsetTxPower (uint8_t power);
-static void ANTopenChannel (byte chNr);
+static void ANTopenChannel (uint8_t chNr);
 
 // *****************************************************************************
 // Initialization and Board setup routines
@@ -365,6 +370,7 @@ uint32_t forceCnts;
   // Read all Sensor data
   readSensorsTask ();
   
+#if 0
   // Calculate moving average of Force buffer sensor values
   forceBufAvg = 0;
   forceBufMax = 0;
@@ -375,7 +381,9 @@ uint32_t forceCnts;
       forceBufMax = Hx711Buf [i];
   }
   forceBufAvg = forceBufAvg / (int32_t) HX711_BUF_SIZE;
+#endif
 
+  forceBufAvg = Hx711SensorFilt;
   // Calculate Force, Torque and eventually Power
   if (forceBufAvg >= Hx711SensorOffset) 
     forceCnts = (uint32_t) (forceBufAvg - Hx711SensorOffset);
@@ -390,8 +398,9 @@ uint32_t forceCnts;
 
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  Serial.println(forceBufAvg);
-  //Serial.printf("%4u %3u %3u %4u b:%d\n", Force, Torque, Cadence, Power, BatteryVoltage);
+  //Serial.println(forceBufAvg);
+  Serial.printf("%4u %3u %d %4u ", Force, Torque, Cadence, Power);
+  //Serial.printf("%u %u %u ", MainCount, TotalSeconds, SendCount);
 #endif
  
   // Broadcast ANT data messages @ 4 Hz update intervals
@@ -401,11 +410,11 @@ uint32_t forceCnts;
     if (AntCalibration)
     {
 #if ANT_SIMULATION == 1
-      broadcastCalibration(true, (word) (Hx711SensorVal + random (0, 100)));
+      broadcastCalibration(true, (uint16_t) (Hx711SensorVal + random (0, 100)));
 #else
       // Tare offset the strain gauge values with averaged value
       Hx711SensorOffset = forceBufAvg;
-      broadcastCalibration(true, (word) (Hx711SensorOffset >> 4));
+      broadcastCalibration(true, (uint16_t) (Hx711SensorOffset >> 4));
       
       // Finally save the configuration to the EEPROM
       eepromSetConfig();
@@ -417,7 +426,7 @@ uint32_t forceCnts;
     {
       AntPedalPower = 0xFF;
       if (Cadence < 255)
-        AntCadence = (byte) Cadence;
+        AntCadence = (uint8_t) Cadence;
       else
         AntCadence = 254;
 #if ANT_SIMULATION == 1
@@ -428,10 +437,6 @@ uint32_t forceCnts;
       AntAccuPower += AntPower;
       broadcastBikePower();
       UpdateEventCount++;
-#if DEBUG_MAIN_PROCESS == 1
-      //sprintf(TmpBuf, "Pdl %u; Cdn %u; TotPwr %u Pwr: %u", AntPedalPower, AntCadence, AntAccuPower, AntPower);
-      //Serial.println(TmpBuf);
-#endif
     }
     // Interleave every 5th message with either Manufacturer Info and Product Info
     // And Battery Info every 15 seconds
@@ -454,7 +459,7 @@ uint32_t forceCnts;
   }
 
   // Run ANT RX parser check with no timeout for incoming requests
-  ANTreceive(0);
+  ANTreceive(ANT_RX_WAIT_TIME);
 
   // Put ANT into sleep mode
   digitalWrite(AP2_SLEEP_PIN, 1);
@@ -470,21 +475,19 @@ uint32_t forceCnts;
 static void handleDelayScenario(uint32_t startMillis)
 {
 uint16_t execMillis;
-  
+
   // Determine execution time, and delay for the remainder
   execMillis = (uint16_t) (millis() - startMillis);
-
+  Serial.println(execMillis);
+  
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_DELAY
   if (execMillis < MAIN_LOOP_MILLIS)
     delay (MAIN_LOOP_MILLIS - execMillis);
 #endif
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_WFI
-  if (execMillis < MAIN_LOOP_MILLIS)
-  {
-    while ((millis() - startMillis) < MAIN_LOOP_MILLIS)
-      // __asm__("wfi");
-      Snooze.idle(Config_teensyLC);
- }
+  while ((millis() - startMillis) < MAIN_LOOP_MILLIS)
+    __asm__("wfi");
+    //Snooze.idle(Config_teensyLC);
 #endif
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_SLEEP
   if (execMillis < MAIN_LOOP_MILLIS)
@@ -508,20 +511,19 @@ uint16_t execMillis;
   }
 #endif
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_VLPR
-  if (execMillis < MAIN_LOOP_MILLIS)
+  // Runs inside macro at 2 Mhz --> Factor 12 slower
+  REDUCED_CPU_BLOCK(DummyConfig)
   {
-    TimerS.setTimer(MAIN_LOOP_MILLIS - execMillis);
-    // Switch to low power clock rate
-    pee_blpe();
-    // Enter into VLPR mode; still running
-    enter_vlpr();
-    // VLPS mode
-    vlps();
-    // Leave VLPR mode
-    exit_vlpr();
-    // Back to normal clock rate
-    blpe_pee();
+    // Run MAIN_LOOP_MILLIS-10 msec inside slow clock
+    while ((millis() - startMillis) < MAIN_LOOP_MILLIS/2)
+      // And snooze idle (WFI instruction)
+      __asm__("wfi");
   }
+  
+  execMillis = millis();
+  while ((millis() - execMillis) < MAIN_LOOP_MILLIS/2)
+    // And snooze idle (WFI instruction)
+    __asm__("wfi");
 #endif
 }
 
@@ -530,45 +532,36 @@ uint16_t execMillis;
 // *****************************************************************************
 static void readSensorsTask()
 {
-  // Every 100 msec bring HX711 out of Power Down mode
-  if ((MainCount % MSEC_TO_TICKS(100)) == 0)
+  // Every 200 msec (was 100) bring HX711 out of Power Down mode
+  if ((MainCount % MSEC_TO_TICKS(200)) == 0)
     hx711.begin(hx711_data_pin, hx711_clock_pin, 128);
-  else if ((MainCount % MSEC_TO_TICKS(100)) == 1)
+  else if ((MainCount % MSEC_TO_TICKS(200)) == 1)
   {
     // Read the value from the HX711 sensor into the sample buffer
     if (hx711.is_ready())
     {
       Hx711SensorVal = hx711.read();
+      // Filter the Force sensor Values
+      Hx711SensorFilt = (((Hx711SensorVal * (int32_t) HX711_FILTER) + (Hx711SensorFilt * (int32_t) (100 - HX711_FILTER))) / (int32_t) 100);
+#if 0
       Hx711Buf [Hx711Index] = Hx711SensorVal;
       Hx711Index++;
       if (Hx711Index >= HX711_BUF_SIZE)
         Hx711Index = 0;
+#endif
     }
     // Power down for 100 msec to save current
     hx711.power_down();
   }
 
-#if 0
-// Simulation
-  else
-  {
-    Hx711SensorVal = 35000 + random (-2500, 10000);
-    Hx711Buf [Hx711Index] = Hx711SensorVal & 0x007FFFFF;
-    Hx711Index++;
-    if (Hx711Index >= HX711_BUF_SIZE)
-      Hx711Index = 0;
-  }
-// End Simulation
-#endif
-
   // Read all three acceleration axes in burst to ensure all measurements correspond to same sample time
   Adxl.readXYZTData(XValue, YValue, ZValue, AdxlTemperature);  
   // Calculate the Temperature in XX.XXX
-  AdxlRealTemperature = ((long) AdxlTemperature - (long) AdxlTempOffset) * (long) 65;
+  AdxlRealTemperature = ((int32_t) AdxlTemperature - (int32_t) AdxlTempOffset) * (int32_t) 65;
 
   // Filter the X and Y Values
-  XValueFilt = (int16_t) ((((long) XValue * (long) XYAXIS_FILTER) + ((long) XValueFilt * (long) (100 - XYAXIS_FILTER))) / (long) 100);
-  YValueFilt = (int16_t) ((((long) YValue * (long) XYAXIS_FILTER) + ((long) YValueFilt * (long) (100 - XYAXIS_FILTER))) / (long) 100);
+  XValueFilt = (int16_t) ((((int32_t) XValue * (int32_t) XYAXIS_FILTER) + ((int32_t) XValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
+  YValueFilt = (int16_t) ((((int32_t) YValue * (int32_t) XYAXIS_FILTER) + ((int32_t) YValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
 
   // Maintain Crank timing
   CrankXTicks++;
@@ -612,11 +605,11 @@ static void readSensorsTask()
   // Calculate X degrees travel to the previous samples (~1000 cnts = 90.0 deg)
   tempAbs = (uint16_t) abs (XValue - XValuePrev);
   if (tempAbs < 1000)
-    XDeg = XDeg + (uint16_t) (((long) tempAbs * (long) 90) / (long) 100);
+    XDeg = XDeg + (uint16_t) (((int32_t) tempAbs * (int32_t) 90) / (int32_t) 100);
   // Calculate Y degrees travel since previous sample (~1000 cnts = 90.0 deg)
   tempAbs = (uint16_t) abs (YValue - YValuePrev);
   if (tempAbs < 1000)
-    YDeg = YDeg + (uint16_t) (((long)tempAbs * (long) 90) / (long) 100);
+    YDeg = YDeg + (uint16_t) (((int32_t)tempAbs * (int32_t) 90) / (int32_t) 100);
 
   // Averaged of X and Y axis should accumulate to above 360 degrees
   CrankTime = CrankTicks * MAIN_LOOP_MILLIS;
@@ -701,22 +694,25 @@ static void determineBatteryStatus()
 // *****************************************************************************
 static void eepromGetConfig()
 {
-int  i;
-long templ;
+int16_t i;
+int32_t templ;
 
   // Check for EEPROM valid data configuration
   if (EEPROM[0] == 0x55 && EEPROM[1] == 0xAA)
   {
     // Read configuration variables out of EEPROM
-    templ = ((long) EEPROM[EE_STRAIN_OFFSET + 0] << 24 |
-             (long) EEPROM[EE_STRAIN_OFFSET + 1] << 16 |
-             (long) EEPROM[EE_STRAIN_OFFSET + 2] << 8  |
-             (long) EEPROM[EE_STRAIN_OFFSET + 3]);
+    templ = ((int32_t) EEPROM[EE_STRAIN_OFFSET + 0] << 24 |
+             (int32_t) EEPROM[EE_STRAIN_OFFSET + 1] << 16 |
+             (int32_t) EEPROM[EE_STRAIN_OFFSET + 2] << 8  |
+             (int32_t) EEPROM[EE_STRAIN_OFFSET + 3]);
     Hx711SensorOffset = templ;
     
-    AdxlTempOffset = ((long) EEPROM[EE_TEMP_OFFSET + 0] << 8  |
-                      (long) EEPROM[EE_TEMP_OFFSET + 1]);
+    AdxlTempOffset = ((int32_t) EEPROM[EE_TEMP_OFFSET + 0] << 8  |
+                      (int32_t) EEPROM[EE_TEMP_OFFSET + 1]);
 
+#if DEBUG_MAIN_PROCESS == 1
+    Serial.println ("EEprom restored");
+#endif  
   } 
   else
   {
@@ -726,6 +722,10 @@ long templ;
     // Clear all contents to 0
     for (i = EE_START_ADDR; i < EEPROM.length(); i++)
       EEPROM.write(i, 0x00);
+
+#if DEBUG_MAIN_PROCESS == 1
+    Serial.println ("EEprom initialized");
+#endif  
   }
 }
 
@@ -735,13 +735,13 @@ long templ;
 static void eepromSetConfig()
 {
   // Write configuration variables to the EEPROM
-  EEPROM[EE_STRAIN_OFFSET + 0] = (byte) ((Hx711SensorOffset >> 24) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 1] = (byte) ((Hx711SensorOffset >> 16) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 2] = (byte) ((Hx711SensorOffset >> 8) & 0x000000FF);
-  EEPROM[EE_STRAIN_OFFSET + 3] = (byte) (Hx711SensorOffset & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 0] = (uint8_t) ((Hx711SensorOffset >> 24) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 1] = (uint8_t) ((Hx711SensorOffset >> 16) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 2] = (uint8_t) ((Hx711SensorOffset >> 8) & 0x000000FF);
+  EEPROM[EE_STRAIN_OFFSET + 3] = (uint8_t) (Hx711SensorOffset & 0x000000FF);
 
-  EEPROM[EE_TEMP_OFFSET + 0] = (byte) ((AdxlTempOffset >> 8) & 0x000000FF);
-  EEPROM[EE_TEMP_OFFSET + 1] = (byte) (AdxlTempOffset & 0x000000FF);
+  EEPROM[EE_TEMP_OFFSET + 0] = (uint8_t) ((AdxlTempOffset >> 8) & 0x000000FF);
+  EEPROM[EE_TEMP_OFFSET + 1] = (uint8_t) (AdxlTempOffset & 0x000000FF);
 }
 
 
@@ -750,42 +750,39 @@ static void eepromSetConfig()
 // *****************************************************************************
 static void antSetup()
 {
-  // Flush any spurious characters
-  AntSerial.flush();
-
   // Send reset to ANT Network
   ANTreset();
   // Delay after resetting the radio (spec: max 2 msec)
   delay (10);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Set the Network Key (currently to DEVELOPER)
   ANTsetNetwork();
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Assign ANT Channel as bi-directional transmitter (Master)
   ANTassignChannel(0, CHANNEL_TYPE_BIDIRECTIONAL_TRANSMIT);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Set Channel ID to Bike Power profile
-  ANTsetChannelId(ANT_CHANNEL_NR, (word) ANT_DEVICE_NR, BIKE_POWER_PROFILE, BIKE_POWER_TT);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTsetChannelId(ANT_CHANNEL_NR, (uint16_t) ANT_DEVICE_NR, BIKE_POWER_PROFILE, BIKE_POWER_TT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Set frequency for profile to 4Hz updates
   ANTsetFrequency(ANT_CHANNEL_NR, BIKE_POWER_RF);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Set ANT period
   ANTsetPeriod(ANT_CHANNEL_NR, BIKE_POWER_CP);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Set ANT Tx Power to medium power for optimum power management
   ANTsetTxPower(ANT_TX_POWER_MEDIUM);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 
   // Open the ANT channel for communication broadcasting
   ANTopenChannel(ANT_CHANNEL_NR);
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
+  ANTreceive(ANT_RX_SETUP_TIMEOUT);
 }
 
 // *****************************************************************************
@@ -810,14 +807,12 @@ uint8_t buf[13];
   buf[11] = highByte (AntPower);
   buf[12] = checkSum(buf, 12);
   ANTsend(buf, 13);
-
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
 }
 
 // *****************************************************************************
 // ANT Broadcast messages; Calibration
 // *****************************************************************************
-static void broadcastCalibration (boolean success, word calibrationVal)
+static void broadcastCalibration (boolean success, uint16_t calibrationVal)
 {
 uint8_t buf[13];
 
@@ -839,8 +834,6 @@ uint8_t buf[13];
   buf[11] = highByte (calibrationVal);
   buf[12] = checkSum(buf, 12);
   ANTsend(buf, 13);
-
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
 }
 
 // *****************************************************************************
@@ -865,8 +858,6 @@ uint8_t buf[13];
   buf[11] = highByte (MODEL_NUMBER);
   buf[12] = checkSum(buf, 12);
   ANTsend(buf, 13);
-
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
 }
 
 // *****************************************************************************
@@ -891,8 +882,6 @@ uint8_t buf[13];
   buf[11] = 0xFF;
   buf[12] = checkSum(buf, 12);
   ANTsend(buf, 13);
-
-  ANTreceive(ANT_RX_MAX_TIMEOUT);
 }
 
 // *****************************************************************************
@@ -921,8 +910,6 @@ uint32_t ticks;
   buf[11] = 0x80 | (BatteryStatus << 4) | (uint8_t) (BatteryVoltage / 100);
   buf[12] = checkSum(buf, 12);
   ANTsend (buf, 13);
-
-  ANTreceive (ANT_RX_MAX_TIMEOUT);
 }
 
 // *****************************************************************************
@@ -941,7 +928,7 @@ static void AP2reset (void)
 // *****************************************************************************
 static bool AP2waitCts (void)
 {
-byte retry = 0;
+uint8_t retry = 0;
 
   // Next send is only allowed when RTS pin is low
   while (digitalRead(AP2_RTS_PIN) && retry < 5)
@@ -955,24 +942,28 @@ byte retry = 0;
 // *****************************************************************************
 // ANT AP2 receive routine(s); ANTreceive
 // *****************************************************************************
-static boolean ANTreceive (word timeout)
+static boolean ANTreceive (uint16_t timeout)
 {
-int sbuflength = 0;
+int16_t sbuflength = 0;
 uint8_t msg = 0;
 uint16_t retry = 0;
 
-  // Wait for start of message reception, timeout in milliseconds
-  if (timeout == 0)
-    timeout = 1;
-  retry = (uint16_t) (timeout * 10);
-  while (sbuflength == 0 && retry > 0)
+  // Wait for start of message reception (if timeout in milliseconds)
+  if (timeout > 0)
   {
-    sbuflength = AntSerial.available();
-    if (sbuflength == 0)
-      delayMicroseconds (100);
-    retry--;
+    retry = (uint16_t) (timeout * 10);
+    while (sbuflength == 0 && retry > 0)
+    {
+      sbuflength = AntSerial.available();
+      if (sbuflength == 0)
+        delayMicroseconds (100);
+      retry--;
+    }
   }
-
+  // No timeout given, just polling mode in the loop
+  else
+    sbuflength = AntSerial.available();
+ 
   while (sbuflength > 0 && MsgIndex < ANT_RXBUF_SIZE)
   {
 #if DEBUG_ANT_RX == 1
@@ -1006,7 +997,7 @@ uint16_t retry = 0;
       if (MsgIndex == MsgLength - 1)
       {
 #if DEBUG_ANT_RX == 1
-        for (int i = 0 ; i < MsgLength ; i++)
+        for (int16_t i = 0 ; i < MsgLength ; i++)
         {
           Serial.print(MsgBuf[i], HEX);
           Serial.print(" ");
@@ -1020,8 +1011,6 @@ uint16_t retry = 0;
     }
 
     // Wait for next character to parse (can be too fast), max 2 ms (slowest ~4800 baud)
-    //if (AntSerial.available() == 0)
-      //delayMicroseconds(2000);
     retry = (uint16_t) (20);
     while (AntSerial.available() == 0 && retry > 0)
     {
@@ -1037,7 +1026,7 @@ uint16_t retry = 0;
   {
     AntTxSetupOK = false;
     digitalWrite(LED_BUILTIN, HIGH);
-    delayMicroseconds (30);
+    delayMicroseconds (50);
     digitalWrite(LED_BUILTIN, LOW);
   }
 
@@ -1138,9 +1127,9 @@ static void ANTrxProcess (void)
 // *****************************************************************************
 // ANT AP2 send routine(s)
 // *****************************************************************************
-static void ANTsend (uint8_t buf[], int length)
+static void ANTsend (uint8_t buf[], int16_t length)
 {
-int i;
+int16_t i;
 
 #if DEBUG_ANT_TX == 1
   Serial.print("ANTsend:");
@@ -1153,6 +1142,7 @@ int i;
     Serial.print(" ");
 #endif
     AntSerial.write(buf[i]);
+    AntSerial.flush();
   }
   // Wait for Clear to Send signal
   AP2waitCts ();
@@ -1164,10 +1154,10 @@ int i;
 // *****************************************************************************
 // ANT message checksum calculation
 // *****************************************************************************
-static byte checkSum (byte *dataPtr, int length)
+static uint8_t checkSum (uint8_t *dataPtr, int16_t length)
 {
-int i;
-byte chksum;
+int16_t i;
+uint8_t chksum;
 
   chksum = dataPtr[0];
   for (i = 1; i < length; i++)
@@ -1196,7 +1186,7 @@ uint8_t buf[5];
 static void ANTsetNetwork (void)
 {
 uint8_t buf[13];
-int i;
+int16_t i;
 
   buf[0] = MSG_TX_SYNC;
   buf[1] = 0x09;
@@ -1211,7 +1201,7 @@ int i;
 // *****************************************************************************
 // ANT setup routine(s); ANTassignChannel
 // *****************************************************************************
-static void ANTassignChannel (byte chNr, byte chType)
+static void ANTassignChannel (uint8_t chNr, uint8_t chType)
 {
 uint8_t buf[7];
 
@@ -1228,7 +1218,7 @@ uint8_t buf[7];
 // *****************************************************************************
 // ANT setup routine(s); ANTsetChannelId
 // *****************************************************************************
-static void ANTsetChannelId (byte chNr, word deviceNr, byte deviceId, byte deviceTt)
+static void ANTsetChannelId (uint8_t chNr, uint16_t deviceNr, uint8_t deviceId, uint8_t deviceTt)
 {
 uint8_t buf[9];
 
@@ -1247,7 +1237,7 @@ uint8_t buf[9];
 // *****************************************************************************
 // ANT setup routine(s); ANTsetFrequency
 // *****************************************************************************
-static void ANTsetFrequency (byte chNr, byte freq)
+static void ANTsetFrequency (uint8_t chNr, uint8_t freq)
 {
 uint8_t buf[6];
 
@@ -1263,7 +1253,7 @@ uint8_t buf[6];
 // *****************************************************************************
 // ANT setup routine(s); ANTsetPeriod
 // *****************************************************************************
-static void ANTsetPeriod (byte chNr, word period)
+static void ANTsetPeriod (uint8_t chNr, uint16_t period)
 {
 uint8_t buf[7];
 
@@ -1296,7 +1286,7 @@ uint8_t buf[6];
 // *****************************************************************************
 // ANT setup routine(s); ANTopenChannel
 // *****************************************************************************
-static void ANTopenChannel (byte chNr)
+static void ANTopenChannel (uint8_t chNr)
 {
 uint8_t buf[5];
 
