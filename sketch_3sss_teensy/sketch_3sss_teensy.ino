@@ -45,12 +45,11 @@
 // Sensor and input definitions
 // Strain Gauge interface
 #define HX711_BUF_SIZE      10
-#define HX711_FILTER        25      // new value for 25 %
+#define HX711_FILTER        50      // new value for 10 %
 #define HX711_DATA_PIN      (3)
 #define HX711_CLOCK_PIN     (2)
-#define FORCE_SCALE_FACTOR  20
+#define FORCE_SCALE_FACTOR  10
 #define DEFAULT_FORCE_DIST  100     // in mm
-#define XYAXIS_FILTER       25      // new value for 50 %
 
 // ADXL362 interface
 #define DEFAULT_TEMP_OFFSET -77     // in counts
@@ -58,6 +57,9 @@
 #define ACTIVITY_TIME       50      // in 100 Hz ticks: 0.5 sec
 #define INACTIVITY_G        50      // in milli G
 #define INACTIVITY_TIME     1000    // in 100 Hz ticks: 10 sec
+
+#define XYAXIS_FILTER       50      // new value for 50 %
+#define MAX_CADENCE         254
 
 #define ADXL362_CS_PIN      (15)
 #define ADXL362_SCK_PIN     (14)
@@ -398,8 +400,8 @@ uint32_t forceCnts;
 
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  //Serial.println(forceBufAvg);
-  Serial.printf("%4u %3u %d %4u ", Force, Torque, Cadence, Power);
+  Serial.println(Hx711SensorFilt);
+  //Serial.printf("%4u %3u %d %4u ", Force, Torque, Cadence, Power);
   //Serial.printf("%u %u %u ", MainCount, TotalSeconds, SendCount);
 #endif
  
@@ -478,7 +480,7 @@ uint16_t execMillis;
 
   // Determine execution time, and delay for the remainder
   execMillis = (uint16_t) (millis() - startMillis);
-  Serial.println(execMillis);
+  //Serial.println(execMillis);
   
 #if MAIN_LOOP_SETPOWER == MAIN_LOOP_DELAY
   if (execMillis < MAIN_LOOP_MILLIS)
@@ -532,10 +534,10 @@ uint16_t execMillis;
 // *****************************************************************************
 static void readSensorsTask()
 {
-  // Every 200 msec (was 100) bring HX711 out of Power Down mode
-  if ((MainCount % MSEC_TO_TICKS(200)) == 0)
+  // Every 100 msec bring HX711 out of Power Down mode
+  if ((MainCount % MSEC_TO_TICKS(100)) == 0)
     hx711.begin(hx711_data_pin, hx711_clock_pin, 128);
-  else if ((MainCount % MSEC_TO_TICKS(200)) == 1)
+  else if ((MainCount % MSEC_TO_TICKS(100)) == 1)
   {
     // Read the value from the HX711 sensor into the sample buffer
     if (hx711.is_ready())
@@ -589,11 +591,13 @@ static void readSensorsTask()
   }
 
   // Calculate Cadence only when above a certain time to prevent too high values
-  // Max Cadence is 60000/(400/2) = 300
-  if ((CrankXTime + CrankYTime) > 400)
+  // Max Cadence is 60000/(472/2) = 254
+  if ((CrankXTime + CrankYTime) > 472)
     Cadence = (uint16_t) 60000 / ((CrankXTime + CrankYTime) / 2);
-  else
+  else if ((CrankXTime + CrankYTime) == 0)
     Cadence = 0;
+  else
+    Cadence = MAX_CADENCE;
   
   // Store previous X, Y axis readings for next loop
   XValuePrev = XValueFilt;
