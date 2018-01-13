@@ -64,6 +64,7 @@
 #define XYAXIS_FILTER       100     // new value for 50 %
 #define MAX_CADENCE         254
 #define CADENCE_FILTER      50      // new value for 50 %
+#define CDN_BUF_SIZE        (4*5)   // 2 * 2 X Y 0-crossings @ 5 revs
 
 #define ADXL362_CS_PIN      (15)
 #define ADXL362_SCK_PIN     (14)
@@ -174,11 +175,14 @@ static uint16_t CrankXTime = 0;
 static uint16_t CrankYDeg = 0;
 static uint16_t CrankYTicks = 0;
 static uint16_t CrankYTime = 0;
-static uint16_t Cadence = 0;
+static uint8_t  Cadence = 0;
+static uint16_t CadenceTotal = 0;
 static uint16_t Force;
 static uint16_t Torque;
 static uint16_t Power;
 static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
+static uint8_t  CadenceBuf [CDN_BUF_SIZE];
+static uint8_t  CadenceBufIndex = 0;
 static uint16_t PowerBuf [POWER_BUF_SIZE];
 static uint8_t  PowerBufIndex = 0;
 
@@ -525,7 +529,7 @@ uint16_t execMillis;
 // *****************************************************************************
 static void readSensorsTask()
 {
-uint16_t cdn = 0;
+uint8_t cdn;
 uint32_t forceCnts;
 
   // Read the value from the HX711 sensor
@@ -554,7 +558,9 @@ uint32_t forceCnts;
   // Maintain Crank timing
   CrankXTicks++;
   CrankYTicks++;
-
+  // Used to determine a Cadence Trigger
+  cdn = 255;
+  
   // Next check on X state change through 0 (every 180 deg)
   if ((XValueFilt < 0 && XValuePrev > 0) || (XValuePrev < 0 && XValueFilt > 0))
     CrankXDeg = CrankXDeg + 180;
@@ -562,59 +568,69 @@ uint32_t forceCnts;
   if ((YValueFilt < 0 && YValuePrev > 0) || (YValuePrev < 0 && YValueFilt > 0))
     CrankYDeg = CrankYDeg + 180;
 
-  // Calculate the time done for 2 revolutions
-  if (CrankXDeg >= 720)
+  // Calculate the time done for 1 revolution
+  if (CrankXDeg >= 360)
   {
     CrankXTime = CrankXTicks * SENSOR_TASK_MILLIS;
     // Calculate Cadence only when above a certain time to prevent too high values
-    // Max Cadence is 60000/(472/2) = 254
-    if (CrankXTime > 472)
-      cdn = (uint16_t) 60000 / (CrankXTime / 2);
+    // Max Cadence is 60000/(236) = 254
+    if (CrankXTime > 236)
+      cdn = (uint8_t) ((uint16_t) 60000 / CrankXTime);
     else
       cdn = MAX_CADENCE;
 
     // Filter the Cadence value
-    Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
+    //Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
     CrankXDeg = 0;
     CrankXTicks = 0;
   }
-  // Calculate the time done for 2 revolutions
-  if (CrankYDeg >= 720)
+  // Calculate the time done for 1 revolution
+  if (CrankYDeg >= 360)
   {
     CrankYTime = CrankYTicks * SENSOR_TASK_MILLIS;
     // Calculate Cadence only when above a certain time to prevent too high values
-    // Max Cadence is 60000/(472/2) = 254
-    if (CrankYTime > 472)
-      cdn = (uint16_t) 60000 / (CrankYTime / 2);
+    // Max Cadence is 60000/(236) = 254
+    if (CrankYTime > 236)
+      cdn = (uint8_t) ((uint16_t) 60000 / CrankYTime);
     else
       cdn = MAX_CADENCE;
 
     // Filter the Cadence value
-    Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
+    //Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
     CrankYDeg = 0;
     CrankYTicks = 0;
   }
 
-  // Reset to 0 when longer than 10 seconds no movement
-  if (CrankXTicks > MSEC_TO_SENSTICKS(10000))
+  // Reset to 0 when longer than 4 seconds no movement
+  if (CrankXTicks > MSEC_TO_SENSTICKS(4000))
   {
     CrankXDeg = 0;
     CrankXTicks = 0;
     CrankXTime = 0;
-    Cadence = 0;
+    cdn = 0;
   }
-  if (CrankYTicks > MSEC_TO_SENSTICKS(10000))
+  if (CrankYTicks > MSEC_TO_SENSTICKS(4000))
   {
     CrankYDeg = 0;
     CrankYTicks = 0;
     CrankYTime = 0;
-    Cadence = 0;
+    cdn = 0;
   }
   // Store previous X, Y axis readings for next loop
   XValuePrev = XValueFilt;
   YValuePrev = YValueFilt;
+  // Put Cadence calculated in buffer when new value available
+  if (cdn != 255)
+  {
+    CadenceTotal = CadenceTotal - CadenceBuf[CadenceBufIndex] + (uint16_t) cdn;
+    Cadence = (uint8_t) (CadenceTotal / CDN_BUF_SIZE);
 
-
+    CadenceBuf[CadenceBufIndex] = cdn;
+    CadenceBufIndex++;
+    if (CadenceBufIndex >= CDN_BUF_SIZE)
+      CadenceBufIndex = 0;
+  }
+  
   // Calculate Force, Torque and Power
   // =================================
   if (Hx711SensorFilt >= Hx711SensorOffset) 
