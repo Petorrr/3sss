@@ -51,10 +51,17 @@ void ADXL362::begin(int16_t chipSelectPin) {
 //  turn on Measurement mode - required after reset
 // 
 void ADXL362::beginMeasure() {
-	byte temp = SPIreadOneRegister(0x2C);	// read Reg 2C for filter control
-	byte tempwrite = temp & 0xFC;			// select 12,5 Hz
+byte temp;
+byte tempwrite;
+
+#if 0	
+	temp = SPIreadOneRegister(0x2C);	// read Reg 2C for filter control
+	//tempwrite = temp & 0xFC;			// select 12,5 Hz
+	//tempwrite = temp | 0x04;			// select 200 Hz
+	tempwrite = 0x95;
 	SPIwriteOneRegister(0x2C, tempwrite);   // Write to FILTER_CTL_REG
 	delay(10);
+#endif
 
 	temp = SPIreadOneRegister(0x2D);	// read Reg 2D before modifying for measure mode
 
@@ -146,6 +153,93 @@ void ADXL362::readXYZTData(int16_t &XData, int16_t &YData, int16_t &ZData, int16
 	Serial.print("\tZDATA = "); Serial.print(ZData); 
 	Serial.print("\tTemperature = "); Serial.println(Temperature);
 #endif
+}
+
+void ADXL362::readFifoData(int16_t *xBufPtr, int16_t *yBufPtr, uint16_t samples){
+uint8_t temp, temph;
+uint8_t i, j;
+int16_t val;
+  
+  digitalWrite(slaveSelectPin, LOW);
+  SPI.transfer(0x0B);  // read instruction
+  SPI.transfer(0x0B);  // read status register
+  temp = SPI.transfer(0x00);
+  // Check for FIFO Watermark bit
+  if ((temp & 0x04) != 0)
+  {
+    SPI.transfer(0x0D);  // FIFO read instruction
+	for (i=0;i<samples;i++)
+	{
+      for (j=0;j<3;j++)
+	  {
+	    temp  = SPI.transfer(0x00);
+        temph = SPI.transfer(0x00);
+        //mask off id bits, combine low byte
+        val = ((temph & 0x3F) << 8) | temp;
+        // get sign bits, copy into B15, B14, combine
+        val = ((val & 0x3000) << 2) | val;
+	    // Check if x-axis or y-axis
+        if (j == 0)
+          xBufPtr[i] = val;
+        else if (j == 1)
+          yBufPtr[i] = val;
+        // drop z-axis    
+#if 0
+	    if ((temph & 0xC0) == 0)
+	    {
+	      // store as x-axis data
+	      val = temp;
+          // copy sign extension bits
+		  if ((temph & 0x30) != 0)
+	        temph = temph | 0xC0;
+	      val = val + (temph << 8);
+	      xBufPtr[i] = val;
+          Serial.printf ("x%d:%d",i,val);
+ 	    }
+        else if ((temph & 0xC0) == 0x40)
+	    {
+	  	  // store as y-axis data
+		  val = temp;
+          // copy sign extension bits
+		  if ((temph & 0x30) != 0)
+	        temph = temph | 0xC0;
+	      else 
+	        temph = temph & 0x3F;
+	      val = val + (temph << 8);
+ 		  yBufPtr[i] = val;
+          Serial.printf ("y%d:%d",i,val);
+	    }
+	    // discard z-axis data
+#endif
+	  }
+      Serial.printf ("x:%d; y%d ",xBufPtr[i], yBufPtr[i]);
+    }
+    
+  }
+  Serial.println();
+  digitalWrite(slaveSelectPin, HIGH);
+}
+
+//
+//  readFifoSize()
+//  Read the current size of the FIFO buffer
+//
+uint16_t ADXL362::readFifoSize(){
+	uint16_t FifoSize;
+	
+      digitalWrite(slaveSelectPin, LOW);
+	  SPI.transfer(0x0B);  // read instruction
+	  SPI.transfer(0x0C);  // Start at Fifo Entries Reg
+	  FifoSize = SPI.transfer(0x00);
+	  FifoSize = FifoSize + (SPI.transfer(0x00) << 8);
+	  digitalWrite(slaveSelectPin, HIGH);
+
+#ifdef ADXL362_DEBUG
+	Serial.print("FifoSize = ");
+	Serial.println(FifoSize);
+#endif
+	
+	return FifoSize;
 }
 
 void ADXL362::setupDCActivityInterrupt(int16_t threshold, byte time){
