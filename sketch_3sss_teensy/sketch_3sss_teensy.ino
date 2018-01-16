@@ -51,7 +51,7 @@
 #define HX711_FILTER        50      // new value for 50 %
 #define HX711_DATA_PIN      (3)
 #define HX711_CLOCK_PIN     (2)
-#define FORCE_SCALE_FACTOR  600
+#define FORCE_SCALE_FACTOR  600     // In HX711 counts
 #define DEFAULT_FORCE_DIST  100     // in mm
 #define POWER_BUF_SIZE      SENS_TICKS_PER_SEC
 
@@ -63,8 +63,8 @@
 #define INACTIVITY_TIME     1000    // in 100 Hz ticks: 10 sec
 #define XYAXIS_FILTER       100     // new value for 50 %
 #define MAX_CADENCE         254
-#define CADENCE_FILTER      50      // new value for 50 %
-#define CDN_BUF_SIZE        (4*5)   // 2 * 2 X Y 0-crossings @ 5 revs
+#define CDN_BUF_SIZE        (2*5)   // 2 x 0-crossings @ 5 revs
+#define USE_ADXL_AXIS       0       // 0=X, 1=Y, 2=Z
 
 #define ADXL362_CS_PIN      (15)
 #define ADXL362_SCK_PIN     (14)
@@ -169,20 +169,19 @@ SnoozeBlock      Config_teensyLC(TimerS, Usb, LC5vBuffer);
 SnoozeBlock      DummyConfig;
 
 // Bike Power processing variables
-static uint16_t CrankXDeg = 0;
-static uint16_t CrankXTicks = 0;
-static uint16_t CrankXTime = 0;
-static uint16_t CrankYDeg = 0;
-static uint16_t CrankYTicks = 0;
-static uint16_t CrankYTime = 0;
+static uint16_t CrankDeg = 0;
+static uint16_t CrankTicks = 0;
+static uint16_t CrankTime = 0;
 static uint8_t  Cadence = 0;
+static uint8_t  PrevCadence = 0;
 static uint16_t CadenceTotal = 0;
+static uint8_t  CadenceBuf [CDN_BUF_SIZE];
+static uint8_t  CadenceBufIndex = 0;
+
 static uint16_t Force;
 static uint16_t Torque;
 static uint16_t Power;
 static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
-static uint8_t  CadenceBuf [CDN_BUF_SIZE];
-static uint8_t  CadenceBufIndex = 0;
 static uint16_t PowerBuf [POWER_BUF_SIZE];
 static uint8_t  PowerBufIndex = 0;
 
@@ -197,13 +196,9 @@ static HX711 hx711 = HX711(hx711_data_pin, hx711_clock_pin, 128);
 
 // ADXL362 interface variables
 static ADXL362  Adxl;
-static int16_t  XValue;
-static int16_t  XValueFilt;
-static int16_t  XValuePrev;
-static int16_t  YValue;
-static int16_t  YValueFilt;
-static int16_t  YValuePrev;
-static int16_t  ZValue;
+static int16_t  AdxlValue;
+static int16_t  AdxlValueFilt;
+static int16_t  AdxlValuePrev;
 static int16_t  AdxlTemperature;
 static int32_t  AdxlRealTemperature;
 static uint16_t AdxlTempOffset = DEFAULT_TEMP_OFFSET;
@@ -399,7 +394,7 @@ uint32_t startMillis;
 
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  Serial.println(Hx711SensorFilt);
+  //Serial.println(Hx711SensorFilt);
   //Serial.printf("%4u %3u %d %4u ", Force, Torque, Cadence, Power);
 #endif
  
@@ -529,8 +524,9 @@ uint16_t execMillis;
 // *****************************************************************************
 static void readSensorsTask()
 {
-uint8_t cdn;
+uint8_t  cdn, i;
 uint32_t forceCnts;
+int16_t  diffDeg;
 
   // Read the value from the HX711 sensor
   // ====================================
@@ -545,80 +541,69 @@ uint32_t forceCnts;
 
   // Read the values from the ADXL sensor
   // ====================================
-  XValue = Adxl.readXData();
-  YValue = Adxl.readYData();
-  // Filter the X and Y Values
+#if USE_ADXL_AXIS==0
+  AdxlValue = Adxl.readXData();
+#elif USE_ADXL_AXIS==1
+  AdxlValue = Adxl.readYData();
+#elif USE_ADXL_AXIS==2
+  AdxlValue = Adxl.readZData();
+#endif  
+
+  // Filter the axis values if configured
 #if XYAXIS_FILTER == 100
-  XValueFilt = XValue;
-  YValueFilt = YValue;
+  AdxlValueFilt = AdxlValue;
 #else
-  XValueFilt = (int16_t) ((((int32_t) XValue * (int32_t) XYAXIS_FILTER) + ((int32_t) XValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
-  YValueFilt = (int16_t) ((((int32_t) YValue * (int32_t) XYAXIS_FILTER) + ((int32_t) YValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
+  AdxlValueFilt = (int16_t) ((((int32_t) AdxlValue * (int32_t) XYAXIS_FILTER) + ((int32_t) AdxlValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
 #endif
+  //Serial.print(AdxlValue);
+  //Serial.print(" ");
+  Serial.println(AdxlValue);
+
   // Maintain Crank timing
-  CrankXTicks++;
-  CrankYTicks++;
+  CrankTicks++;
+  CrankTime = CrankTicks * SENSOR_TASK_MILLIS;
   // Used to determine a Cadence Trigger
   cdn = 255;
   
-  // Next check on X state change through 0 (every 180 deg)
-  if ((XValueFilt < 0 && XValuePrev > 0) || (XValuePrev < 0 && XValueFilt > 0))
-    CrankXDeg = CrankXDeg + 180;
-  // Next check on Y state change through 0 (every 180 deg)
-  if ((YValueFilt < 0 && YValuePrev > 0) || (YValuePrev < 0 && YValueFilt > 0))
-    CrankYDeg = CrankYDeg + 180;
+  // Next check on Axis state change through 0 (every 180 deg)
+  if ((AdxlValueFilt < 0 && AdxlValuePrev > 0) || (AdxlValuePrev < 0 && AdxlValueFilt > 0))
+    CrankDeg = CrankDeg + 180;
 
   // Calculate the time done for 1 revolution
-  if (CrankXDeg >= 360)
+  if (CrankDeg >= 360)
   {
-    CrankXTime = CrankXTicks * SENSOR_TASK_MILLIS;
     // Calculate Cadence only when above a certain time to prevent too high values
     // Max Cadence is 60000/(236) = 254
-    if (CrankXTime > 236)
-      cdn = (uint8_t) ((uint16_t) 60000 / CrankXTime);
+    if (CrankTime > 236)
+      cdn = (uint8_t) ((uint16_t) 60000 / CrankTime);
     else
       cdn = MAX_CADENCE;
 
-    // Filter the Cadence value
-    //Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
-    CrankXDeg = 0;
-    CrankXTicks = 0;
+    CrankDeg = 0;
+    CrankTicks = 0;
   }
-  // Calculate the time done for 1 revolution
-  if (CrankYDeg >= 360)
+  else if (PrevCadence > 0)
   {
-    CrankYTime = CrankYTicks * SENSOR_TASK_MILLIS;
-    // Calculate Cadence only when above a certain time to prevent too high values
-    // Max Cadence is 60000/(236) = 254
-    if (CrankYTime > 236)
-      cdn = (uint8_t) ((uint16_t) 60000 / CrankYTime);
-    else
-      cdn = MAX_CADENCE;
-
-    // Filter the Cadence value
-    //Cadence = (int16_t) ((((int32_t) cdn * (int32_t) CADENCE_FILTER) + ((int32_t) Cadence * (int32_t) (100 - CADENCE_FILTER))) / (int32_t) 100);
-    CrankYDeg = 0;
-    CrankYTicks = 0;
+    // Based on previous Cadence, expect on time to calculate again for filtering down
+    if (CrankTime > ((uint16_t) 60000 / (uint16_t) PrevCadence))
+      cdn = (uint8_t) ((uint16_t) 60000 / CrankTime);
   }
 
-  // Reset to 0 when longer than 4 seconds no movement
-  if (CrankXTicks > MSEC_TO_SENSTICKS(4000))
+  // Reset to 0 when longer than 5 seconds no movement
+  if (CrankTicks > MSEC_TO_SENSTICKS(5000))
   {
-    CrankXDeg = 0;
-    CrankXTicks = 0;
-    CrankXTime = 0;
+    CrankDeg = 0;
+    CrankTicks = 0;
+    CadenceTotal = 0;
     cdn = 0;
+    // Flush buffer contents
+    for (i = 0; i < CDN_BUF_SIZE; i++)
+      CadenceBuf[i] = 0;
   }
-  if (CrankYTicks > MSEC_TO_SENSTICKS(4000))
-  {
-    CrankYDeg = 0;
-    CrankYTicks = 0;
-    CrankYTime = 0;
-    cdn = 0;
-  }
-  // Store previous X, Y axis readings for next loop
-  XValuePrev = XValueFilt;
-  YValuePrev = YValueFilt;
+
+  // Store previous axis readings for next loop
+  AdxlValuePrev = AdxlValueFilt;
+
   // Put Cadence calculated in buffer when new value available
   if (cdn != 255)
   {
@@ -629,6 +614,8 @@ uint32_t forceCnts;
     CadenceBufIndex++;
     if (CadenceBufIndex >= CDN_BUF_SIZE)
       CadenceBufIndex = 0;
+    // Store this cadence for next sample calculation to compare on time expectation
+    PrevCadence = cdn;
   }
   
   // Calculate Force, Torque and Power
