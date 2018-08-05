@@ -15,6 +15,7 @@
 // *****************************************************************************
 // Main Loop timing definitions
 #define MAIN_LOOP_MILLIS    250
+#define HX711_POWER_UP      (250-60)
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
 
@@ -68,12 +69,12 @@
 
 // Sensor and input definitions
 // Strain Gauge interface
-#define HX711_FILTER        50      // new value for 50 %
+#define HX711_FILTER        100     // new value for 50 %
 #define HX711_DATA_PIN      (3)
 #define HX711_CLOCK_PIN     (2)
 #define FORCE_SCALE_FACTOR  600     // In HX711 counts
 #define DEFAULT_FORCE_DIST  100     // in mm
-#define POWER_BUF_SIZE      SENS_TICKS_PER_SEC
+#define POWER_BUF_SIZE      2*SENS_TICKS_PER_SEC
 
 // ADXL362 interface
 #define DEFAULT_TEMP_OFFSET -77     // in counts
@@ -93,7 +94,6 @@
 
 // Hall Sensor definitions
 #define CADENCE_INT_PIN     (23)
-#define CADENCE_PWR_PIN     (0)
 
 // Analog inputs interface/sensors
 #define ANA_RES_BITS        12
@@ -364,11 +364,9 @@ uint8_t temp;
   // *** Only for testing
   pinMode (20, INPUT);                  // INT2 AWAKE status
 
-  // Configure the Hall Sensor; Power and Signal lines
-  pinMode(CADENCE_PWR_PIN, OUTPUT);
+  // Configure the Reed sensor to input
   pinMode(CADENCE_INT_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(CADENCE_INT_PIN), cadenceInterrupt, FALLING);
-  digitalWrite(CADENCE_PWR_PIN, 1);
   
   // Initialize the AP2 interface pins
 #ifdef AP2_BR1_PIN
@@ -416,7 +414,7 @@ uint8_t temp;
 
   // Start the sensors task @ 50 msec
   //SensorsTimer.begin(readSensorsTask, SENSOR_TASK_MILLIS*1000);
-  SensorsTimer.begin(cadenceTimerTask, 1000);
+  //SensorsTimer.begin(cadenceTimerTask, 1000);
 }
 
 // *****************************************************************************
@@ -603,7 +601,8 @@ int16_t  diffDeg;
   {
     Hx711SensorVal = hx711.read();
     // Filter the Force sensor Values
-    Hx711SensorFilt = (((Hx711SensorVal * (int32_t) HX711_FILTER) + (Hx711SensorFilt * (int32_t) (100 - HX711_FILTER))) / (int32_t) 100);
+    //Hx711SensorFilt = (((Hx711SensorVal * (int32_t) HX711_FILTER) + (Hx711SensorFilt * (int32_t) (100 - HX711_FILTER))) / (int32_t) 100);
+    Hx711SensorFilt = Hx711SensorVal;
   }
   // And save power
   //hx711.power_down();
@@ -741,21 +740,21 @@ static void cadenceTimerTask()
 static void cadenceInterrupt()
 {
   // Determine the cycle time in milliseconds
-  //CadenceMillis = millis();
-  //CadenceCount = CadenceMillis - CadenceMillisPrev;
+  CadenceMillis = millis();
+  CadenceCount = (uint16_t) (CadenceMillis - CadenceMillisPrev);
   // Save for next passing
-  //CadenceMillisPrev = CadenceMillis;
+  CadenceMillisPrev = CadenceMillis;
   // Calculate Cadence only when above a certain time to prevent too high values
   // Max Cadence is 60000/(236) = 254
-  noInterrupts();
+  //noInterrupts();
   if (CadenceCount > MIN_CADENCE_TIME && CadenceCount < CADENCE_TIMEOUT)
   {
     Cadence = (uint8_t) ((uint16_t) 60000 / (uint16_t) CadenceCount);
-    CadenceCount = 0;
+    //CadenceCount = 0;
     // Keep timeout counter reset
     CrankTicks = 0;
   }
-  interrupts();
+  //interrupts();
 }
 
 // *****************************************************************************
