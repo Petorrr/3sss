@@ -25,10 +25,19 @@
 #define MAIN_LOOP_HIBERNATE 4
 #define MAIN_LOOP_VLPR      5
 #define MAIN_LOOP_SETPOWER  MAIN_LOOP_WFI
+
 // Sensors Task timing definitions
-#define SENSOR_TASK_MILLIS  50
+#define SENSOR_TASK_MILLIS  250
 #define SENS_TICKS_PER_SEC  (1000/SENSOR_TASK_MILLIS)
 #define MSEC_TO_SENSTICKS(x)(uint16_t) (((uint32_t) (x)*(uint32_t) SENS_TICKS_PER_SEC)/(uint32_t) 1000)
+
+// Cadence definitions
+#define CADENCE_ADXL        0
+#define CADENCE_HALL        1
+#define CADENCE_CALC        CADENCE_HALL
+// Cadence timing in milliseconds: Between 12 and 254
+#define CADENCE_TIMEOUT     5000
+#define MIN_CADENCE_TIME    236
 
 // Debug settings definitions
 #define DEBUG               1
@@ -46,6 +55,17 @@
 #define SW_MAIN_REVISION    1
 #define SW_SUB_REVISION     2
 
+// Unused controller pins
+#define UNUSED1_PIN         (4)
+#define UNUSED2_PIN         (5)
+#define UNUSED3_PIN         (6)
+#define UNUSED4_PIN         (7)
+#define UNUSED5_PIN         (8)
+#define UNUSED6_PIN         (20)
+#define UNUSED7_PIN         (21)
+#define UNUSED8_PIN         (22)
+//#define UNUSED9_PIN         (23)
+
 // Sensor and input definitions
 // Strain Gauge interface
 #define HX711_FILTER        50      // new value for 50 %
@@ -61,13 +81,19 @@
 #define ACTIVITY_TIME       50      // in 100 Hz ticks: 0.5 sec
 #define INACTIVITY_G        50      // in milli G
 #define INACTIVITY_TIME     1000    // in 100 Hz ticks: 10 sec
-#define XYAXIS_FILTER       100     // new value for 50 %
+#define XYAXIS_FILTER       100     // new value for XX %
+#define XYZERO_FILTER       1       // new value for XX %
 #define MAX_CADENCE         254
-#define CDN_BUF_SIZE        (2*5)   // 2 x 0-crossings @ 5 revs
+#define CDN_BUF_SIZE        (2*3)   // 2 x 0-crossings @ 3 revs
 #define USE_ADXL_AXIS       0       // 0=X, 1=Y, 2=Z
+#define ADXL_BUF_SIZE       2*SENS_TICKS_PER_SEC
 
 #define ADXL362_CS_PIN      (15)
 #define ADXL362_SCK_PIN     (14)
+
+// Hall Sensor definitions
+#define CADENCE_INT_PIN     (23)
+#define CADENCE_PWR_PIN     (0)
 
 // Analog inputs interface/sensors
 #define ANA_RES_BITS        12
@@ -170,13 +196,18 @@ SnoozeBlock      DummyConfig;
 
 // Bike Power processing variables
 static uint16_t CrankDeg = 0;
-static uint16_t CrankTicks = 0;
-static uint16_t CrankTime = 0;
-static uint8_t  Cadence = 0;
-static uint8_t  PrevCadence = 0;
+static volatile uint16_t CrankTicks = 0;
+static volatile uint16_t CrankTime = 0;
+static volatile uint8_t Cadence = 0;
+static volatile uint8_t PrevCadence = 0;
 static uint16_t CadenceTotal = 0;
 static uint8_t  CadenceBuf [CDN_BUF_SIZE];
 static uint8_t  CadenceBufIndex = 0;
+
+static volatile uint16_t CadenceCount = 0;
+static volatile uint32_t CadenceMillis = 0;
+static volatile uint32_t CadenceMillisPrev = 0;
+static volatile boolean  CadenceReady = false;
 
 static uint16_t Force;
 static uint16_t Torque;
@@ -199,6 +230,10 @@ static ADXL362  Adxl;
 static int16_t  AdxlValue;
 static int16_t  AdxlValueFilt;
 static int16_t  AdxlValuePrev;
+static int16_t  AdxlBuf [ADXL_BUF_SIZE];
+static int16_t  AdxlBufIndex = 0;
+static int16_t  AdxlValueZero = 0;
+static int32_t  AdxlTotal;
 static int16_t  AdxlTemperature;
 static int32_t  AdxlRealTemperature;
 static uint16_t AdxlTempOffset = DEFAULT_TEMP_OFFSET;
@@ -231,6 +266,8 @@ static boolean  AntTxSetupOK = false;
 // *****************************************************************************
 static void handleDelayScenario(uint32_t startMillis);
 static void readSensorsTask();
+static void cadenceTimerTask();
+static void cadenceInterrupt();
 
 static uint32_t getInputVoltage();
 static void determineBatteryStatus();
@@ -283,7 +320,29 @@ uint8_t temp;
   eepromGetConfig();
   //*** Only for testing
   AdxlTempOffset = DEFAULT_TEMP_OFFSET;
-  
+
+#if 0
+  // All unused pins to output mode (saves power)
+  pinMode(UNUSED1_PIN, OUTPUT);
+  pinMode(UNUSED2_PIN, OUTPUT);
+  pinMode(UNUSED3_PIN, OUTPUT);
+  pinMode(UNUSED4_PIN, OUTPUT);
+  pinMode(UNUSED5_PIN, OUTPUT);
+  pinMode(UNUSED6_PIN, OUTPUT);
+  pinMode(UNUSED7_PIN, OUTPUT);
+  pinMode(UNUSED8_PIN, OUTPUT);
+  pinMode(UNUSED9_PIN, OUTPUT);
+  digitalWrite(UNUSED1_PIN, 0);
+  digitalWrite(UNUSED2_PIN, 0);
+  digitalWrite(UNUSED3_PIN, 0);
+  digitalWrite(UNUSED4_PIN, 0);
+  digitalWrite(UNUSED5_PIN, 0);
+  digitalWrite(UNUSED6_PIN, 0);
+  digitalWrite(UNUSED7_PIN, 0);
+  digitalWrite(UNUSED8_PIN, 0);
+  digitalWrite(UNUSED9_PIN, 0);
+#endif
+
   // Initialize the SPI and ADXL interfaces
   pinMode(ADXL362_CS_PIN, OUTPUT);
   digitalWrite(ADXL362_CS_PIN, 1);
@@ -305,6 +364,12 @@ uint8_t temp;
   // *** Only for testing
   pinMode (20, INPUT);                  // INT2 AWAKE status
 
+  // Configure the Hall Sensor; Power and Signal lines
+  pinMode(CADENCE_PWR_PIN, OUTPUT);
+  pinMode(CADENCE_INT_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(CADENCE_INT_PIN), cadenceInterrupt, FALLING);
+  digitalWrite(CADENCE_PWR_PIN, 1);
+  
   // Initialize the AP2 interface pins
 #ifdef AP2_BR1_PIN
   pinMode(AP2_BR1_PIN, OUTPUT);
@@ -350,7 +415,8 @@ uint8_t temp;
 #endif
 
   // Start the sensors task @ 50 msec
-  SensorsTimer.begin(readSensorsTask, SENSOR_TASK_MILLIS*1000);
+  //SensorsTimer.begin(readSensorsTask, SENSOR_TASK_MILLIS*1000);
+  SensorsTimer.begin(cadenceTimerTask, 1000);
 }
 
 // *****************************************************************************
@@ -381,6 +447,9 @@ uint32_t startMillis;
     TotalSeconds++;
   }
 
+  // Read Sensor data and calculations
+  readSensorsTask();
+  
   // Calculate moving average of Power buffer values
   powerBufAvg = 0;
   powerBufMax = 0;
@@ -420,7 +489,7 @@ uint32_t startMillis;
     else if ((SendCount % 5) != 4)
     {
       AntPedalPower = 0xFF;
-      AntCadence = (uint8_t) Cadence;
+      AntCadence = Cadence;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
@@ -555,18 +624,37 @@ int16_t  diffDeg;
 #else
   AdxlValueFilt = (int16_t) ((((int32_t) AdxlValue * (int32_t) XYAXIS_FILTER) + ((int32_t) AdxlValueFilt * (int32_t) (100 - XYAXIS_FILTER))) / (int32_t) 100);
 #endif
-  //Serial.print(AdxlValue);
-  //Serial.print(" ");
-  Serial.println(AdxlValue);
+
+  AdxlValueZero = (int16_t) ((((int32_t) AdxlValueFilt * (int32_t) XYZERO_FILTER) + ((int32_t) AdxlValueZero * (int32_t) (100 - XYZERO_FILTER))) / (int32_t) 100);
+#if 0
+  AdxlTotal = AdxlTotal - (int32_t) AdxlBuf[AdxlBufIndex] + (int32_t) AdxlValueFilt;
+  AdxlValueZero = (int16_t) (AdxlTotal / ADXL_BUF_SIZE);
+  AdxlBuf[AdxlBufIndex] = AdxlValueFilt;
+  AdxlBufIndex++;
+  if (AdxlBufIndex >= ADXL_BUF_SIZE)
+    AdxlBufIndex = 0;
+#endif
+  //Serial.println(AdxlValue);
 
   // Maintain Crank timing
   CrankTicks++;
   CrankTime = CrankTicks * SENSOR_TASK_MILLIS;
+#if CADENCE_CALC == CADENCE_HALL
+  // Cadence calculation based on Hall Sensor done in interrupt
+  if (CrankTime >= CADENCE_TIMEOUT)
+  {
+    // Lower than Cadence 12 --> Drop to 0
+    Cadence = 0;
+    CadenceCount = 0;
+    CrankTicks = 0;
+  }
+
+#else
   // Used to determine a Cadence Trigger
   cdn = 255;
   
   // Next check on Axis state change through 0 (every 180 deg)
-  if ((AdxlValueFilt < 0 && AdxlValuePrev > 0) || (AdxlValuePrev < 0 && AdxlValueFilt > 0))
+  if ((AdxlValueFilt < AdxlValueZero && AdxlValuePrev > AdxlValueZero) || (AdxlValuePrev < AdxlValueZero && AdxlValueFilt > AdxlValueZero))
     CrankDeg = CrankDeg + 180;
 
   // Calculate the time done for 1 revolution
@@ -594,9 +682,13 @@ int16_t  diffDeg;
   {
     CrankDeg = 0;
     CrankTicks = 0;
+    AdxlValueZero = 0;
+    
     CadenceTotal = 0;
     cdn = 0;
     // Flush buffer contents
+    for (i = 0; i < ADXL_BUF_SIZE; i++)
+      AdxlBuf[i] = 0;
     for (i = 0; i < CDN_BUF_SIZE; i++)
       CadenceBuf[i] = 0;
   }
@@ -617,6 +709,7 @@ int16_t  diffDeg;
     // Store this cadence for next sample calculation to compare on time expectation
     PrevCadence = cdn;
   }
+#endif
   
   // Calculate Force, Torque and Power
   // =================================
@@ -632,6 +725,37 @@ int16_t  diffDeg;
   PowerBufIndex++;
   if (PowerBufIndex >= POWER_BUF_SIZE)
     PowerBufIndex = 0;
+}
+
+// *****************************************************************************
+// Cadence Interrupt handler
+// *****************************************************************************
+static void cadenceTimerTask()
+{
+  CadenceCount++;
+}
+
+// *****************************************************************************
+// Cadence Interrupt handler
+// *****************************************************************************
+static void cadenceInterrupt()
+{
+  // Determine the cycle time in milliseconds
+  //CadenceMillis = millis();
+  //CadenceCount = CadenceMillis - CadenceMillisPrev;
+  // Save for next passing
+  //CadenceMillisPrev = CadenceMillis;
+  // Calculate Cadence only when above a certain time to prevent too high values
+  // Max Cadence is 60000/(236) = 254
+  noInterrupts();
+  if (CadenceCount > MIN_CADENCE_TIME && CadenceCount < CADENCE_TIMEOUT)
+  {
+    Cadence = (uint8_t) ((uint16_t) 60000 / (uint16_t) CadenceCount);
+    CadenceCount = 0;
+    // Keep timeout counter reset
+    CrankTicks = 0;
+  }
+  interrupts();
 }
 
 // *****************************************************************************
