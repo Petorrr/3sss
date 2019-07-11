@@ -3,6 +3,7 @@
 // *****************************************************************************
 #include <stdio.h>
 #include <SPI.h>
+//#include <ArduinoLowPower.h>
 #include "src\hx711.h"
 #include "src\bmg250.h"
 #include "src\flashaseeprom.h"
@@ -15,6 +16,7 @@
 #define HX711_PWRUP_MILLIS  (MAIN_LOOP_MILLIS-60)
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
+#define INACTIVE_TIMEOUT    (5 * 60)
 
 #define MAIN_LOOP_DELAY     0
 #define MAIN_LOOP_WFI       1
@@ -43,17 +45,18 @@
 
 // Strain Gauge interface
 #define HX711_FILTER        50      // new value for 50 %
-#define HX711_DATA_PIN      (3)
-#define HX711_CLOCK_PIN     (2)
-#define FORCE_SCALE_FACTOR  600     // In HX711 counts
+#define HX711_DATA_PIN      (A0)
+#define HX711_CLOCK_PIN     (A1)
+#define FORCE_SCALE_FACTOR  200     // In HX711 counts
 #define DEFAULT_FORCE_DIST  100     // in mm
 #define POWER_BUF_SIZE      2*MAIN_TICKS_PER_SEC
+#define CADENCE_FILTER      20      // New sensor value for 20 %
 
 // BMG250 definitions
 #define BMG250_MAXDEG   1000
 
 // Battery status definitions
-#define BATTERY_FULL         1
+#define BATTERY_FULL        1
 #define BATTERY_GOOD        2
 #define BATTERY_OK          3
 #define BATTERY_LOW         4
@@ -135,6 +138,7 @@ static uint16_t MainCount = 0;
 static uint16_t BatteryVoltage = 0;
 static uint8_t  BatteryStatus;
 static uint32_t TotalSeconds = 0;
+static uint32_t InactiveSeconds = 0;
 
 // Loadcell, Strain Gauge Amplifier variables
 const uint8_t  hx711_data_pin = HX711_DATA_PIN;
@@ -158,6 +162,7 @@ static char PrintBuf [160];
 static int16_t  CadenceX;
 static int16_t  CadenceY;
 static int16_t  CadenceZ;
+static int16_t  CadenceFilt = 0;
 static uint16_t Force;
 static uint16_t Torque;
 static uint16_t Power;
@@ -245,8 +250,9 @@ int8_t rslt = BMG250_OK;
 #endif
 
   // Initialize digital LED pin as an output
-  pinMode(RED_LED_PIN, OUTPUT);
-
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+  
   // Read the Configuration for the EEPROM storage
   eepromGetConfig();
 
@@ -337,6 +343,7 @@ void loop()
 int16_t  i;
 uint16_t powerBufMax;
 uint32_t startMillis;
+int      rxChar=-1;
 
   // Setup and maintain loop timing and counter, blinky
   startMillis = millis();
@@ -353,12 +360,17 @@ uint32_t startMillis;
       // Turn off LED indicator
       digitalWrite(LED_BUILTIN, LOW);
     }
+    // Increment Seconds counters
     TotalSeconds++;
+    InactiveSeconds++;
   }
 
   // Read Sensor data and calculations
   readSensorsTask();
-  
+  // Whenever there is some Cadence, keep Inactive timer reset
+  if (CadenceFilt > 5)
+    InactiveSeconds = 0;
+    
   // Calculate maximum of Power buffer values
   powerBufMax = 0;
   for (i = 0; i < POWER_BUF_SIZE; i++)
@@ -369,9 +381,16 @@ uint32_t startMillis;
 
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  sprintf(PrintBuf, "Cx: %8d, Cy: %8d, Cz: %8d, T: %6d, HX711: %8d, bat: %3d", CadenceX, CadenceY, CadenceZ, Gyro_data.sensortime, Hx711SensorVal, BatteryVoltage);
-  Serial.println(PrintBuf);
-  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u", Force, Torque, CadenceZ, Power);
+  // Log Strain Gauges only for Serial Plotter
+  //sprintf(PrintBuf, "%8d", Hx711SensorVal);
+  //Serial.println(PrintBuf);
+  
+  // Log all sensor values
+  //sprintf(PrintBuf, "Cx: %8d, Cy: %8d, Cz: %8d, T: %6d, HX711: %8d, bat: %3d", CadenceX, CadenceY, CadenceZ, Gyro_data.sensortime, Hx711SensorVal, BatteryVoltage);
+  //Serial.println(PrintBuf);
+
+  // Log Force, Torqu, Cadence and Power
+  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u %d", Force, Torque, CadenceFilt, Power, InactiveSeconds);
   Serial.println(PrintBuf);
 #endif
 
@@ -396,7 +415,7 @@ uint32_t startMillis;
     else if ((SendCount % 5) != 4)
     {
       AntPedalPower = 0xFF;
-      AntCadence = CadenceZ;
+      AntCadence = CadenceFilt;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
@@ -413,6 +432,10 @@ uint32_t startMillis;
       // Battery Info every 15 seconds
       if ((SendCount % 60) == 4)
       {
+        // Blink short every 15 seconds, another run indcator
+        digitalWrite(LED_BUILTIN, HIGH);
+        delayMicroseconds(100);
+        digitalWrite(LED_BUILTIN, LOW);
         determineBatteryStatus();
         broadcastBatteryInfo();
       }
@@ -431,6 +454,13 @@ uint32_t startMillis;
 
   // Put ANT into sleep mode
   digitalWrite(AP2_SLEEP_PIN, 1);
+  if (InactiveSeconds >= INACTIVE_TIMEOUT)
+  {
+    // Activate Deep Sleep mode, only to recover with a RESET
+    SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+    __WFI();
+    //LowPower.deepSleep();
+  }
   // At last handle the 'sleep' until next main cycle needed
   handleDelayScenario(startMillis);
   // Resume the ANT communication from sleep
@@ -494,6 +524,9 @@ int16_t  xDeg, yDeg, zDeg;
   CadenceX = (int16_t) ((int32_t) 60 * (int32_t) xDeg / (int32_t) 360);
   CadenceY = (int16_t) ((int32_t) 60 * (int32_t) yDeg / (int32_t) 360);
   CadenceZ = (int16_t) ((int32_t) 60 * (int32_t) zDeg / (int32_t) 360);
+  if (CadenceZ < 0)
+    CadenceZ = -CadenceZ;
+  CadenceFilt = (((CadenceZ * (int16_t) CADENCE_FILTER) + (CadenceFilt * (int16_t) (100 - CADENCE_FILTER))) / (int16_t) 100);
   
   // =================================
   // Calculate Force, Torque and Power
@@ -504,8 +537,7 @@ int16_t  xDeg, yDeg, zDeg;
     forceCnts = (uint32_t) (Hx711SensorOffset - Hx711SensorVal);
   Force  = (uint16_t) (forceCnts / (uint32_t) FORCE_SCALE_FACTOR);
   Torque = (uint16_t) (((uint32_t) Force * (uint32_t) ForceDistance) / (uint32_t) 1000);
-  if (CadenceZ >= 0)
-    Power  = (uint16_t) (((uint32_t) 105 * (uint32_t) CadenceZ * (uint32_t) Torque) / (uint32_t) 1000);
+  Power  = (uint16_t) (((uint32_t) 105 * (uint32_t) CadenceFilt * (uint32_t) Torque) / (uint32_t) 1000);
   // Store calculated Power in buffer
   PowerBuf[PowerBufIndex] = Power;
   PowerBufIndex++;
