@@ -47,8 +47,8 @@
 #define HX711_FILTER        50      // new value for 50 %
 #define HX711_DATA_PIN      (A0)
 #define HX711_CLOCK_PIN     (A1)
-#define FORCE_SCALE_FACTOR  200     // In HX711 counts
-#define DEFAULT_FORCE_DIST  100     // in mm
+#define FORCE_SCALE_FACTOR  320     // In HX711 counts
+#define DEFAULT_FORCE_DIST  88      // in mm
 #define POWER_BUF_SIZE      2*MAIN_TICKS_PER_SEC
 #define CADENCE_FILTER      20      // New sensor value for 20 %
 
@@ -341,9 +341,8 @@ int8_t rslt = BMG250_OK;
 void loop()
 {
 int16_t  i;
-uint16_t powerBufMax;
+uint16_t powerBufAvg;
 uint32_t startMillis;
-int      rxChar=-1;
 
   // Setup and maintain loop timing and counter, blinky
   startMillis = millis();
@@ -371,14 +370,12 @@ int      rxChar=-1;
   if (CadenceFilt > 5)
     InactiveSeconds = 0;
     
-  // Calculate maximum of Power buffer values
-  powerBufMax = 0;
+  // Calculate average of Power buffer values
+  powerBufAvg = 0;
   for (i = 0; i < POWER_BUF_SIZE; i++)
-  {
-    if (PowerBuf [i] > powerBufMax)
-      powerBufMax = PowerBuf [i];
-  }
-
+    powerBufAvg = powerBufAvg + PowerBuf[i];
+  powerBufAvg = powerBufAvg / POWER_BUF_SIZE;
+  
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
   // Log Strain Gauges only for Serial Plotter
@@ -390,7 +387,7 @@ int      rxChar=-1;
   //Serial.println(PrintBuf);
 
   // Log Force, Torqu, Cadence and Power
-  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u %d", Force, Torque, CadenceFilt, Power, InactiveSeconds);
+  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u", Force, Torque, CadenceFilt, Power);
   Serial.println(PrintBuf);
 #endif
 
@@ -419,7 +416,7 @@ int      rxChar=-1;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
-      AntPower = powerBufMax;
+      AntPower = powerBufAvg;
 #endif
       AntAccuPower += AntPower;
       broadcastBikePower();
@@ -456,6 +453,8 @@ int      rxChar=-1;
   digitalWrite(AP2_SLEEP_PIN, 1);
   if (InactiveSeconds >= INACTIVE_TIMEOUT)
   {
+    // Suspend ANT, stops communication
+    digitalWrite(AP2_SUSPEND_PIN, 0);
     // Activate Deep Sleep mode, only to recover with a RESET
     SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
     __WFI();
@@ -518,11 +517,13 @@ int16_t  xDeg, yDeg, zDeg;
   // Read the value from the Gyro sensors
   // =====================================
   GyroSts = bmg250_get_sensor_data(BMG250_DATA_TIME_SEL, &Gyro_data, &Gyro_dev);
+#if 0
   xDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.x) / (int32_t) 32767);
-  yDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.y) / (int32_t) 32767);
-  zDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.z) / (int32_t) 32767);
   CadenceX = (int16_t) ((int32_t) 60 * (int32_t) xDeg / (int32_t) 360);
+  yDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.y) / (int32_t) 32767);
   CadenceY = (int16_t) ((int32_t) 60 * (int32_t) yDeg / (int32_t) 360);
+#endif
+  zDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.z) / (int32_t) 32767);
   CadenceZ = (int16_t) ((int32_t) 60 * (int32_t) zDeg / (int32_t) 360);
   if (CadenceZ < 0)
     CadenceZ = -CadenceZ;
