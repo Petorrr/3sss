@@ -12,8 +12,8 @@
 // DEFINITIONS Section
 // *****************************************************************************
 // Main Loop timing definitions
-#define MAIN_LOOP_MILLIS    250
-#define HX711_PWRUP_MILLIS  (MAIN_LOOP_MILLIS-60)
+#define MAIN_LOOP_MILLIS    125
+#define HX711_PWRUP_MILLIS  (MAIN_LOOP_MILLIS-70)
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
 #define INACTIVE_TIMEOUT    (5 * 60)
@@ -47,13 +47,13 @@
 #define HX711_FILTER        50      // new value for 50 %
 #define HX711_DATA_PIN      (A0)
 #define HX711_CLOCK_PIN     (A1)
-#define FORCE_SCALE_FACTOR  320     // In HX711 counts
+#define FORCE_SCALE_FACTOR  363     // In HX711 counts
 #define DEFAULT_FORCE_DIST  88      // in mm
-#define POWER_BUF_SIZE      2*MAIN_TICKS_PER_SEC
-#define CADENCE_FILTER      20      // New sensor value for 20 %
+#define POWER_BUF_SIZE      (1*MAIN_TICKS_PER_SEC)
+#define CADENCE_FILTER      35      // New sensor value for XX %
 
 // BMG250 definitions
-#define BMG250_MAXDEG   1000
+#define BMG250_MAXDEG       1000
 
 // Battery status definitions
 #define BATTERY_FULL        1
@@ -169,6 +169,7 @@ static uint16_t Power;
 static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
 static uint16_t PowerBuf [POWER_BUF_SIZE];
 static uint8_t  PowerBufIndex = 0;
+static uint16_t PowerAvg;
 
 // ANT communication data
 #define AntSerial Serial1
@@ -341,7 +342,7 @@ int8_t rslt = BMG250_OK;
 void loop()
 {
 int16_t  i;
-uint16_t powerBufAvg;
+uint32_t powerBufAvg;
 uint32_t startMillis;
 
   // Setup and maintain loop timing and counter, blinky
@@ -373,8 +374,11 @@ uint32_t startMillis;
   // Calculate average of Power buffer values
   powerBufAvg = 0;
   for (i = 0; i < POWER_BUF_SIZE; i++)
+  {
     powerBufAvg = powerBufAvg + PowerBuf[i];
-  powerBufAvg = powerBufAvg / POWER_BUF_SIZE;
+  }
+
+  PowerAvg = powerBufAvg / POWER_BUF_SIZE;
   
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
@@ -386,7 +390,7 @@ uint32_t startMillis;
   //sprintf(PrintBuf, "Cx: %8d, Cy: %8d, Cz: %8d, T: %6d, HX711: %8d, bat: %3d", CadenceX, CadenceY, CadenceZ, Gyro_data.sensortime, Hx711SensorVal, BatteryVoltage);
   //Serial.println(PrintBuf);
 
-  // Log Force, Torqu, Cadence and Power
+  // Log Force, Torque, Cadence and Power
   sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u", Force, Torque, CadenceFilt, Power);
   Serial.println(PrintBuf);
 #endif
@@ -416,7 +420,7 @@ uint32_t startMillis;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
-      AntPower = powerBufAvg;
+      AntPower = PowerAvg * 2;
 #endif
       AntAccuPower += AntPower;
       broadcastBikePower();
@@ -556,13 +560,13 @@ uint16_t vbat;
   // Battery monitoring
   vbat = analogRead(VBAT_PIN);
   BatteryVoltage = (vbat * 2 * 330) / 1024;        // divided by 2, multiply by Ref and divide by 1024
-  if (BatteryVoltage < 330)
+  if (BatteryVoltage < 355)
     BatteryStatus = BATTERY_CRITICAL;
-  else if (BatteryVoltage < 340)
+  else if (BatteryVoltage < 365)
     BatteryStatus = BATTERY_LOW;
-  else if (BatteryVoltage < 350)
+  else if (BatteryVoltage < 375)
     BatteryStatus = BATTERY_OK;
-  else if (BatteryVoltage < 360)
+  else if (BatteryVoltage < 380)
     BatteryStatus = BATTERY_GOOD;
   else
     BatteryStatus = BATTERY_FULL;
@@ -1231,4 +1235,3 @@ uint8_t buf[5];
   buf[4] = checkSum(buf, 4);
   ANTsend(buf, 5);
 }
-
