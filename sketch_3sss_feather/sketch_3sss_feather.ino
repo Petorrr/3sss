@@ -12,7 +12,7 @@
 // DEFINITIONS Section
 // *****************************************************************************
 // Main Loop timing definitions
-#define MAIN_LOOP_MILLIS    125
+#define MAIN_LOOP_MILLIS    250
 #define HX711_PWRUP_MILLIS  (MAIN_LOOP_MILLIS-70)
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
@@ -44,13 +44,13 @@
 #define EE_NEXT_SETTING     EE_START_ADDR + 4
 
 // Strain Gauge interface
-#define HX711_FILTER        50      // new value for 50 %
+#define HX711_FILTER        80      // new value for 50 %
 #define HX711_DATA_PIN      (A0)
 #define HX711_CLOCK_PIN     (A1)
 #define FORCE_SCALE_FACTOR  363     // In HX711 counts
 #define DEFAULT_FORCE_DIST  88      // in mm
-#define POWER_BUF_SIZE      (1*MAIN_TICKS_PER_SEC)
-#define CADENCE_FILTER      35      // New sensor value for XX %
+#define POWER_BUF_SIZE      1*MAIN_TICKS_PER_SEC
+#define CADENCE_FILTER      80      // New sensor value for 20 %
 
 // BMG250 definitions
 #define BMG250_MAXDEG       1000
@@ -342,7 +342,7 @@ int8_t rslt = BMG250_OK;
 void loop()
 {
 int16_t  i;
-uint32_t powerBufAvg;
+uint16_t powerBufAvg;
 uint32_t startMillis;
 
   // Setup and maintain loop timing and counter, blinky
@@ -370,7 +370,7 @@ uint32_t startMillis;
   // Whenever there is some Cadence, keep Inactive timer reset
   if (CadenceFilt > 5)
     InactiveSeconds = 0;
-    
+
   // Calculate average of Power buffer values
   powerBufAvg = 0;
   for (i = 0; i < POWER_BUF_SIZE; i++)
@@ -383,7 +383,7 @@ uint32_t startMillis;
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
   // Log Strain Gauges only for Serial Plotter
-  //sprintf(PrintBuf, "%8d", Hx711SensorVal);
+ // sprintf(PrintBuf, "%8d, F:%4u", Hx711SensorVal, Force);
   //Serial.println(PrintBuf);
   
   // Log all sensor values
@@ -391,7 +391,7 @@ uint32_t startMillis;
   //Serial.println(PrintBuf);
 
   // Log Force, Torque, Cadence and Power
-  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u", Force, Torque, CadenceFilt, Power);
+  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u Pbuf:%3u", Force, Torque, CadenceFilt, Power*2, PowerAvg *2);
   Serial.println(PrintBuf);
 #endif
 
@@ -420,7 +420,7 @@ uint32_t startMillis;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
-      AntPower = PowerAvg * 2;
+      AntPower = Power * 2;
 #endif
       AntAccuPower += AntPower;
       broadcastBikePower();
