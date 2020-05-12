@@ -3,7 +3,6 @@
 // *****************************************************************************
 #include <stdio.h>
 #include <SPI.h>
-//#include <ArduinoLowPower.h>
 #include "src\hx711.h"
 #include "src\bmg250.h"
 #include "src\flashaseeprom.h"
@@ -12,15 +11,11 @@
 // DEFINITIONS Section
 // *****************************************************************************
 // Main Loop timing definitions
-#define MAIN_LOOP_MILLIS    250
+#define MAIN_LOOP_MILLIS    50
 #define HX711_PWRUP_MILLIS  (MAIN_LOOP_MILLIS-70)
 #define MAIN_TICKS_PER_SEC  (1000/MAIN_LOOP_MILLIS)
 #define MSEC_TO_TICKS(x)    (uint16_t) (((uint32_t) (x)*(uint32_t) MAIN_TICKS_PER_SEC)/(uint32_t) 1000)
 #define INACTIVE_TIMEOUT    (5 * 60)
-
-#define MAIN_LOOP_DELAY     0
-#define MAIN_LOOP_WFI       1
-#define MAIN_LOOP_SETPOWER  MAIN_LOOP_WFI
 
 // Debug settings definitions
 #define DEBUG               1
@@ -31,12 +26,15 @@
 #endif
 #define ANT_SIMULATION      0
 
+// Feature settings definitions
+#define AUTOCAL_SETTING     0
+
 // Set the pins used
-#define VBAT_PIN        (A7)
-#define RED_LED_PIN     (13)
-#define HX711_DATA_PIN  (14)
-#define HX711_CLOCK_PIN (15)
-#define BMG250_SELECT   (A5)
+#define VBAT_PIN           (A7)
+#define RED_LED_PIN        (13)
+#define HX711_DATA_PIN     (14)
+#define HX711_CLOCK_PIN    (15)
+#define BMG250_SELECT      (A5)
 
 // EEPROM address definitions
 #define EE_START_ADDR       2
@@ -44,13 +42,15 @@
 #define EE_NEXT_SETTING     EE_START_ADDR + 4
 
 // Strain Gauge interface
-#define HX711_FILTER        80      // new value for 50 %
+#define HX711_FILTER        50      // new value for 50 %
 #define HX711_DATA_PIN      (A0)
 #define HX711_CLOCK_PIN     (A1)
 #define FORCE_SCALE_FACTOR  363     // In HX711 counts
 #define DEFAULT_FORCE_DIST  88      // in mm
-#define POWER_BUF_SIZE      1*MAIN_TICKS_PER_SEC
-#define CADENCE_FILTER      80      // New sensor value for 20 %
+#define POWER_BUF_SIZE      255
+#define CADENCE_FILTER      80      // New sensor value for XX %
+#define AUTOCAL_DIFF        200     // In HX711 counts
+#define AUTOCAL_TIME        5       // In seconds
 
 // BMG250 definitions
 #define BMG250_MAXDEG       1000
@@ -169,7 +169,10 @@ static uint16_t Power;
 static uint16_t ForceDistance = DEFAULT_FORCE_DIST;
 static uint16_t PowerBuf [POWER_BUF_SIZE];
 static uint8_t  PowerBufIndex = 0;
-static uint16_t PowerAvg;
+static uint16_t PowerAvg = 0;
+static uint32_t PowerAvgSum = 0;
+static uint16_t Deg360Samples = MAIN_TICKS_PER_SEC;
+static boolean  AutoCal = true;
 
 // ANT communication data
 #define AntSerial Serial1
@@ -199,6 +202,7 @@ static boolean  AntTxSetupOK = false;
 // *****************************************************************************
 static void handleDelayScenario(uint32_t startMillis);
 static void readSensorsTask();
+static void calculatePowerAvg(void);
 
 static int8_t SPIread(uint8_t id, uint8_t reg, uint8_t *dataPtr, uint16_t len);
 static int8_t SPIwrite(uint8_t id, uint8_t reg, uint8_t *dataPtr, uint16_t len);
@@ -247,7 +251,12 @@ int8_t rslt = BMG250_OK;
   // Wait for native USB to be ready, max 5 seconds timeout
   while (!Serial && millis() < 5000)
     ;
-  Serial.println("\nFeather Basic Setup start");
+#if AUTOCAL_SETTING == 1
+  sprintf(PrintBuf,"3SSS AutoCal V%1d.%02d", SW_MAIN_REVISION, SW_SUB_REVISION);
+#else
+  sprintf(PrintBuf,"3SSS V%1d.%02d", SW_MAIN_REVISION, SW_SUB_REVISION);
+#endif
+  Serial.println(PrintBuf);
 #endif
 
   // Initialize digital LED pin as an output
@@ -341,8 +350,7 @@ int8_t rslt = BMG250_OK;
 // *****************************************************************************
 void loop()
 {
-int16_t  i;
-uint16_t powerBufAvg;
+uint32_t diff;
 uint32_t startMillis;
 
   // Setup and maintain loop timing and counter, blinky
@@ -367,32 +375,47 @@ uint32_t startMillis;
 
   // Read Sensor data and calculations
   readSensorsTask();
-  // Whenever there is some Cadence, keep Inactive timer reset
+  // Whenever there is some Cadence
   if (CadenceFilt > 5)
-    InactiveSeconds = 0;
-
-  // Calculate average of Power buffer values
-  powerBufAvg = 0;
-  for (i = 0; i < POWER_BUF_SIZE; i++)
   {
-    powerBufAvg = powerBufAvg + PowerBuf[i];
+    // Keep Inactive timer reset and prepare for next AutoCal
+    InactiveSeconds = 0;
+    AutoCal = true;
   }
+#if AUTOCAL_SETTING == 1
+  // Check for AutoCal process; no Cadence for more than 5 seconds
+  else if (CadenceFilt == 0 && InactiveSeconds >= AUTOCAL_TIME && AutoCal)
+  {
+    if (Hx711SensorFilt >= Hx711SensorOffset) 
+      diff = (uint32_t) (Hx711SensorFilt - Hx711SensorOffset);
+    else
+      diff = (uint32_t) (Hx711SensorOffset - Hx711SensorFilt);
+    if (diff < (int32_t) AUTOCAL_DIFF)
+    {
+      // Store newly calibrated value and save to eeprom
+      Hx711SensorOffset = Hx711SensorFilt;
+      eepromSetConfig();
+    }
+    AutoCal = false;
+  }
+#endif
 
-  PowerAvg = powerBufAvg / POWER_BUF_SIZE;
-  
   // Output serial data for debugging
 #if DEBUG_MAIN_PROCESS == 1
-  // Log Strain Gauges only for Serial Plotter
- // sprintf(PrintBuf, "%8d, F:%4u", Hx711SensorVal, Force);
-  //Serial.println(PrintBuf);
+  if ((MainCount % MSEC_TO_TICKS(250)) == 2)
+  {
+    // Log Strain Gauges only for Serial Plotter
+    //sprintf(PrintBuf, "%8d, F:%4u", Hx711SensorVal, Force);
+    //Serial.println(PrintBuf);
+    
+    // Log all sensor values
+    //sprintf(PrintBuf, "Cx: %8d, Cy: %8d, Cz: %8d, T: %6d, HX711: %8d, bat: %3d", CadenceX, CadenceY, CadenceZ, Gyro_data.sensortime, Hx711SensorVal, BatteryVoltage);
+    //Serial.println(PrintBuf);
   
-  // Log all sensor values
-  //sprintf(PrintBuf, "Cx: %8d, Cy: %8d, Cz: %8d, T: %6d, HX711: %8d, bat: %3d", CadenceX, CadenceY, CadenceZ, Gyro_data.sensortime, Hx711SensorVal, BatteryVoltage);
-  //Serial.println(PrintBuf);
-
-  // Log Force, Torque, Cadence and Power
-  sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u Pbuf:%3u", Force, Torque, CadenceFilt, Power*2, PowerAvg *2);
-  Serial.println(PrintBuf);
+    // Log Force, Torque, Cadence and Power
+    sprintf(PrintBuf, "F:%4u T:%3u C:%3d P:%3u Pavg:%3u", Force, Torque, CadenceFilt, Power*2, PowerAvg*2);
+    Serial.println(PrintBuf);
+  }
 #endif
 
   // Broadcast ANT data messages @ 4 Hz update intervals
@@ -420,7 +443,9 @@ uint32_t startMillis;
 #if ANT_SIMULATION == 1
       AntPower = 300 + random (-25, 100);
 #else
-      AntPower = Power * 2;
+      calculatePowerAvg();
+      AntPower = PowerAvg * 2;
+    
 #endif
       AntAccuPower += AntPower;
       broadcastBikePower();
@@ -454,7 +479,7 @@ uint32_t startMillis;
   ANTreceive(ANT_RX_WAIT_TIME);
 
   // Put ANT into sleep mode
-  digitalWrite(AP2_SLEEP_PIN, 1);
+  //digitalWrite(AP2_SLEEP_PIN, 1);
   if (InactiveSeconds >= INACTIVE_TIMEOUT)
   {
     // Suspend ANT, stops communication
@@ -462,12 +487,11 @@ uint32_t startMillis;
     // Activate Deep Sleep mode, only to recover with a RESET
     SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
     __WFI();
-    //LowPower.deepSleep();
   }
   // At last handle the 'sleep' until next main cycle needed
   handleDelayScenario(startMillis);
   // Resume the ANT communication from sleep
-  digitalWrite(AP2_SLEEP_PIN, 0);
+  // digitalWrite(AP2_SLEEP_PIN, 0);
 }
 
 // *****************************************************************************
@@ -477,26 +501,19 @@ static void handleDelayScenario(uint32_t startMillis)
 {
 uint16_t execMillis;
   
-#if MAIN_LOOP_SETPOWER == MAIN_LOOP_DELAY
-  // Determine execution time, and delay for the remainder
-  execMillis = (uint16_t) (millis() - startMillis);
-  delay(MAIN_LOOP_MILLIS - execMillis - HX711_PWRUP_MILLIS);
-  hx711.power_up();
-  delay(HX711_PWRUP_MILLIS);
-#endif
-#if MAIN_LOOP_SETPOWER == MAIN_LOOP_WFI
   do
   {
     // Idle mode, Wait for Interrupt instruction
     __asm__("wfi");
     // Determine execution time, and delay for the remainder
     execMillis = (uint16_t) (millis() - startMillis);
+#if MAIN_LOOP_MILLIS >= 125
     // Power up the HX711 'startup time' before Main Loop needs to run again
     if (execMillis > HX711_PWRUP_MILLIS)
       hx711.power_up();
+#endif
   }
   while (execMillis < MAIN_LOOP_MILLIS);
-#endif
 }
 
 // *****************************************************************************
@@ -512,8 +529,12 @@ int16_t  xDeg, yDeg, zDeg;
   // ====================================
   if (hx711.is_ready())
     Hx711SensorVal = hx711.read();
+
+#if MAIN_LOOP_MILLIS >=125
   // And save power by powering down the HX711 and Strain Gauge measurement
   hx711.power_down();
+#endif
+
   // Save a filtered value for Calibration purposes
   Hx711SensorFilt = (((Hx711SensorVal * (int32_t) HX711_FILTER) + (Hx711SensorFilt * (int32_t) (100 - HX711_FILTER))) / (int32_t) 100);
   
@@ -548,7 +569,50 @@ int16_t  xDeg, yDeg, zDeg;
   PowerBufIndex++;
   if (PowerBufIndex >= POWER_BUF_SIZE)
     PowerBufIndex = 0;
+ }
+
+// *****************************************************************************
+// Calculate the Average Power out of PowerBuf for last cadence cycle
+// *****************************************************************************
+static void calculatePowerAvg(void)
+{
+uint16_t i, samples;
+uint16_t msec;
+
+  // Below Cadence == 5 consider fall back to 0
+  if (CadenceFilt < 5)
+  {
+    PowerAvg = 0;
+    return;
+  }
+
+  // Calculate this Cadence buffer sample size to use for average
+  msec = (uint16_t) 60000 / (uint16_t) CadenceFilt;
+  Deg360Samples = MSEC_TO_TICKS(msec);
+
+  // Calculate average; PowerBufIndex-1 .. Deg360Samples backwards
+  if (PowerBufIndex == 0)
+    i = POWER_BUF_SIZE - 1;
+  else
+    i = PowerBufIndex - 1; 
+  // Reset sample counter and Average sum
+  PowerAvgSum = 0;
+  samples = 0;
+  // Do count for all samples back in time
+  do
+  {
+    PowerAvgSum = PowerAvgSum + PowerBuf[i];
+    if (i == 0)
+      i = POWER_BUF_SIZE - 1;
+    else 
+      i--;
+    samples++;
+  }
+  while (samples < Deg360Samples);
+  
+  PowerAvg = (uint16_t) (PowerAvgSum / (uint32_t) Deg360Samples);
 }
+
 
 // *****************************************************************************
 // Determine Battery Voltage and Status level
