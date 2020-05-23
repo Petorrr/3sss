@@ -26,8 +26,12 @@
 #endif
 #define ANT_SIMULATION      0
 
+//=============================
 // Feature settings definitions
-#define AUTOCAL_SETTING     0
+//=============================
+#define AUTOCAL_SETTING     0      // Turn Autocal feature on (1) or off (0)
+#define POWER_MAX_SETTING   1      // Turn Power Max over average feature on (1) or off (0)
+//=============================
 
 // Set the pins used
 #define VBAT_PIN           (A7)
@@ -45,12 +49,18 @@
 #define HX711_FILTER        50      // new value for 50 %
 #define HX711_DATA_PIN      (A0)
 #define HX711_CLOCK_PIN     (A1)
-#define FORCE_SCALE_FACTOR  363     // In HX711 counts
+
+//================================
+// Defineable settings definitions
+//================================
+#define FORCE_SCALE_FACTOR  347     // In HX711 counts
 #define DEFAULT_FORCE_DIST  88      // in mm
 #define POWER_BUF_SIZE      255
-#define CADENCE_FILTER      80      // New sensor value for XX %
-#define AUTOCAL_DIFF        200     // In HX711 counts
+#define CADENCE_FILTER      60      // New sensor value for XX %
+#define AUTOCAL_DIFF        2000     // In HX711 counts
 #define AUTOCAL_TIME        5       // In seconds
+#define POWER_MAX_DIFF      300     // In Watt
+//================================
 
 // BMG250 definitions
 #define BMG250_MAXDEG       1000
@@ -67,7 +77,7 @@
 #define MANUFACTURER_ID     ((uint16_t) 0x00FF)
 #define MODEL_NUMBER        ((uint16_t) 3555)
 #define SW_MAIN_REVISION    1
-#define SW_SUB_REVISION     4
+#define SW_SUB_REVISION     7
 
 // ANT AP2 Interface definitions
 #define AP2_TX_PIN          (1)
@@ -247,7 +257,6 @@ void setup()
 int8_t rslt = BMG250_OK;
 
   Serial.begin(115200);
-#if DEBUG_MAIN_PROCESS == 1
   // Wait for native USB to be ready, max 5 seconds timeout
   while (!Serial && millis() < 5000)
     ;
@@ -257,7 +266,6 @@ int8_t rslt = BMG250_OK;
   sprintf(PrintBuf,"3SSS V%1d.%02d", SW_MAIN_REVISION, SW_SUB_REVISION);
 #endif
   Serial.println(PrintBuf);
-#endif
 
   // Initialize digital LED pin as an output
   pinMode(LED_BUILTIN, OUTPUT);
@@ -304,8 +312,8 @@ int8_t rslt = BMG250_OK;
 #endif
   if (rslt == BMG250_OK)
   {
-    // Selecting the ODR as 25Hz
-    Gyro_cfg.odr = BMG250_ODR_25HZ;
+    // Selecting the ODR as 50Hz
+    Gyro_cfg.odr = BMG250_ODR_50HZ;
     // Selecting the bw as Normal mode
     Gyro_cfg.bw = BMG250_BW_NORMAL_MODE;
     // Modify Range into 1000 DPS
@@ -482,7 +490,12 @@ uint32_t startMillis;
   //digitalWrite(AP2_SLEEP_PIN, 1);
   if (InactiveSeconds >= INACTIVE_TIMEOUT)
   {
+#if DEBUG_MAIN_PROCESS == 1
+    Serial.println("Entering power down mode");
+#endif
     // Suspend ANT, stops communication
+    digitalWrite(AP2_SLEEP_PIN, 1);
+    delay(1);
     digitalWrite(AP2_SUSPEND_PIN, 0);
     // Activate Deep Sleep mode, only to recover with a RESET
     SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
@@ -523,6 +536,7 @@ static void readSensorsTask()
 {
 uint32_t forceCnts;
 int16_t  xDeg, yDeg, zDeg;
+uint8_t  reg_data;
 
   // ====================================
   // Read the value from the HX711 sensor
@@ -541,17 +555,35 @@ int16_t  xDeg, yDeg, zDeg;
   // =====================================
   // Read the value from the Gyro sensors
   // =====================================
-  GyroSts = bmg250_get_sensor_data(BMG250_DATA_TIME_SEL, &Gyro_data, &Gyro_dev);
+  // Read the drdy status bit (bit 6)
+  GyroSts = bmg250_get_regs(BMG250_STATUS_ADDR, &reg_data, 1, &Gyro_dev);
+  if (GyroSts == BMG250_OK && ((reg_data & 0x40) > 0))
+  { 
+    // Data is ready, read gyro sensor data
+    GyroSts = bmg250_get_sensor_data(BMG250_DATA_TIME_SEL, &Gyro_data, &Gyro_dev);
+    if (GyroSts == BMG250_OK)
+    {
 #if 0
-  xDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.x) / (int32_t) 32767);
-  CadenceX = (int16_t) ((int32_t) 60 * (int32_t) xDeg / (int32_t) 360);
-  yDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.y) / (int32_t) 32767);
-  CadenceY = (int16_t) ((int32_t) 60 * (int32_t) yDeg / (int32_t) 360);
+      xDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.x) / (int32_t) 32768);
+      CadenceX = (int16_t) ((int32_t) 60 * (int32_t) xDeg / (int32_t) 360);
+      yDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.y) / (int32_t) 32768);
+      CadenceY = (int16_t) ((int32_t) 60 * (int32_t) yDeg / (int32_t) 360);
 #endif
-  zDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.z) / (int32_t) 32767);
-  CadenceZ = (int16_t) ((int32_t) 60 * (int32_t) zDeg / (int32_t) 360);
-  if (CadenceZ < 0)
-    CadenceZ = -CadenceZ;
+      zDeg = (int16_t) (((int32_t) BMG250_MAXDEG * (int32_t) Gyro_data.z) / (int32_t) 32768);
+      CadenceZ = (int16_t) ((int32_t) 60 * (int32_t) zDeg / (int32_t) 360);
+      if (CadenceZ < 0)
+        CadenceZ = -CadenceZ;
+    }
+  }
+#if DEBUG_MAIN_PROCESS == 1
+  else
+  {
+    sprintf(PrintBuf, "Sts=%d, reg_data=%02X", GyroSts, reg_data);
+    Serial.println(PrintBuf);
+  }
+#endif
+
+  // If a sample misses or error, continue filtering with assuming previous value
   CadenceFilt = (((CadenceZ * (int16_t) CADENCE_FILTER) + (CadenceFilt * (int16_t) (100 - CADENCE_FILTER))) / (int16_t) 100);
   
   // =================================
@@ -563,7 +595,7 @@ int16_t  xDeg, yDeg, zDeg;
     forceCnts = (uint32_t) (Hx711SensorOffset - Hx711SensorVal);
   Force  = (uint16_t) (forceCnts / (uint32_t) FORCE_SCALE_FACTOR);
   Torque = (uint16_t) (((uint32_t) Force * (uint32_t) ForceDistance) / (uint32_t) 1000);
-  Power  = (uint16_t) (((uint32_t) 105 * (uint32_t) CadenceFilt * (uint32_t) Torque) / (uint32_t) 1000);
+  Power  = (uint16_t) (((uint32_t) 105 * (uint32_t) CadenceZ * (uint32_t) Torque) / (uint32_t) 1000);
   // Store calculated Power in buffer
   PowerBuf[PowerBufIndex] = Power;
   PowerBufIndex++;
@@ -578,6 +610,7 @@ static void calculatePowerAvg(void)
 {
 uint16_t i, samples;
 uint16_t msec;
+uint16_t powerMax;
 
   // Below Cadence == 5 consider fall back to 0
   if (CadenceFilt < 5)
@@ -597,11 +630,16 @@ uint16_t msec;
     i = PowerBufIndex - 1; 
   // Reset sample counter and Average sum
   PowerAvgSum = 0;
+  powerMax = 0;
   samples = 0;
   // Do count for all samples back in time
   do
   {
     PowerAvgSum = PowerAvgSum + PowerBuf[i];
+#if POWER_MAX_SETTING == 1 
+    if (PowerBuf[i] > powerMax)
+      powerMax = PowerBuf[i];
+#endif
     if (i == 0)
       i = POWER_BUF_SIZE - 1;
     else 
@@ -611,6 +649,13 @@ uint16_t msec;
   while (samples < Deg360Samples);
   
   PowerAvg = (uint16_t) (PowerAvgSum / (uint32_t) Deg360Samples);
+
+#if POWER_MAX_SETTING == 1 
+    // Override the average to the peak value when exceeds the threshold diff
+    if (powerMax > (PowerAvg + POWER_MAX_DIFF))
+      PowerAvg = (PowerAvg + powerMax) / 2;
+#endif
+
 }
 
 
